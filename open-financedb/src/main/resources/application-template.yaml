@@ -1,0 +1,74 @@
+# ============================================================
+# application-template.yaml
+# 复制此文件为 application-dev.yaml 或 application-build.yaml，
+# 然后填入你的实际配置值。
+# ============================================================
+
+spring:
+  datasource:
+    url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:superK}?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    username: ${MYSQL_USERNAME:your_mysql_username}
+    password: ${MYSQL_PASSWORD:your_mysql_password}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      database: ${REDIS_DATABASE:0}
+      timeout: 3s
+
+management:
+  influx:
+    metrics:
+      export:
+        enabled: true
+        uri: ${INFLUXDB_URI:http://localhost:8086}
+        org: ${INFLUXDB_ORG:your_org}
+        bucket: ${INFLUXDB_BUCKET:your_bucket}
+        token: ${INFLUXDB_TOKEN:your_influxdb_token}
+        step: 10s
+
+tushare_live: ${TUSHARE_LIVE:false}
+tushare_token: ${TUSHARE_TOKEN:your_tushare_token}
+tushare_http_url: ${TUSHARE_HTTP_URL:http://tushare.xyz}
+
+finance:
+  redis:
+    enabled: ${FINANCE_REDIS_ENABLED:true}
+    host: ${REDIS_HOST:localhost}
+    port: ${REDIS_PORT:6379}
+    password: ${REDIS_PASSWORD:}
+    database: ${REDIS_DATABASE:0}
+    timeout: 3s
+  startup:
+    bootstrap-enabled: ${FINANCE_STARTUP_BOOTSTRAP:true}
+  history-sync:
+    enabled: ${FINANCE_HISTORY_SYNC:true}
+    default-start-date: 2015-01-01
+    idle-sleep: 30s
+  http:
+    core-pool-size: 4
+    max-pool-size: 16
+    queue-capacity: 1000
+    connect-timeout: 10s
+    read-timeout: 60s
+    write-timeout: 60s
+    call-timeout: 70s
+  influx:
+    uri: ${INFLUXDB_URI:http://localhost:8086}
+    org: ${INFLUXDB_ORG:your_org}
+    bucket: ${INFLUXDB_BUCKET:your_bucket}
+    token: ${INFLUXDB_TOKEN:your_influxdb_token}
+  tushare:
+    http-url: ${TUSHARE_HTTP_URL:http://tushare.xyz}
+    token: ${TUSHARE_TOKEN:your_tushare_token}
+    qps:
+      stk_mins: 5
+      stock_basic: 1
+      trade_cal: 1
+      adj_factor: 2
+      daily: 2
+      income: 1
+      fina_indicator: 1
+      rt_min_daily: 2

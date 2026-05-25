@@ -1,0 +1,40 @@
+spring:
+  application:
+    name: open-financedb
+  profiles:
+    active: dev
+  datasource:
+    hikari:
+      pool-name: open-financedb-hikari
+      minimum-idle: 5
+      maximum-pool-size: 20
+      idle-timeout: 300000
+      max-lifetime: 1800000
+      connection-timeout: 30000
+      validation-timeout: 5000
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:3306}
+      password: ${REDIS_PASSWORD:}
+      database: ${REDIS_DATABASE:0}
+      timeout: 3s
+  jackson:
+    time-zone: Asia/Shanghai
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+
+logging:
+  level:
+    com.fbw.finance.openfinancedb: INFO
+
+finance:
+  redis:
+    enabled: ${FINANCE_REDIS_ENABLED:true}
+    host: ${REDIS_HOST:localhost}
+    port: ${REDIS_PORT:3306}
+    password: ${REDIS_PASSWORD:}
+    database: ${REDIS_DATABASE:0}
+    timeout: 3s
