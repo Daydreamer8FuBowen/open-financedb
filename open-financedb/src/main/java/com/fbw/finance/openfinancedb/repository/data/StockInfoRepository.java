@@ -22,6 +22,8 @@ public interface StockInfoRepository {
 
     List<StockInfoEntity> findRealtimeSyncEnabled();
 
+    Optional<StockInfoEntity> findNextRealtimeSyncEnabledAfterId(Long afterId);
+
     PageResult<StockInfoEntity> page(StockInfoPageReqVO reqVO);
 
     int batchUpdateSyncEnabled(List<Long> ids, Boolean enabled);

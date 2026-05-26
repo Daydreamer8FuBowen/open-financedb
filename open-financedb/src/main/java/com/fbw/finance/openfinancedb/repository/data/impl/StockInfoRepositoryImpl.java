@@ -96,6 +96,18 @@ public class StockInfoRepositoryImpl implements StockInfoRepository {
     }
 
     @Override
+    public Optional<StockInfoEntity> findNextRealtimeSyncEnabledAfterId(Long afterId) {
+        long safeAfterId = afterId == null ? 0L : afterId;
+        LambdaQueryWrapper<StockInfoEntity> queryWrapper = new LambdaQueryWrapper<StockInfoEntity>()
+                .eq(StockInfoEntity::getIsRealtimeSyncEnabled, true)
+                .eq(StockInfoEntity::getStatus, "LISTED")
+                .gt(StockInfoEntity::getId, safeAfterId)
+                .orderByAsc(StockInfoEntity::getId)
+                .last("limit 1");
+        return Optional.ofNullable(stockInfoMapper.selectOne(queryWrapper));
+    }
+
+    @Override
     public PageResult<StockInfoEntity> page(StockInfoPageReqVO reqVO) {
         LambdaQueryWrapper<StockInfoEntity> queryWrapper = buildQueryWrapper(reqVO)
                 .orderByDesc(StockInfoEntity::getId);

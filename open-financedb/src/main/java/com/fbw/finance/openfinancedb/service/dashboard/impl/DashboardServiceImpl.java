@@ -15,6 +15,7 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 @Service
 public class DashboardServiceImpl implements DashboardService {
@@ -48,7 +49,16 @@ public class DashboardServiceImpl implements DashboardService {
         LambdaQueryWrapper<SyncLogEntity> todayWrapper = new LambdaQueryWrapper<>();
         todayWrapper.ge(SyncLogEntity::getCreatedAt, todayStart)
                    .lt(SyncLogEntity::getCreatedAt, todayEnd);
-        vo.setTodaySyncCount(syncLogMapper.selectCount(todayWrapper));
+
+        LambdaQueryWrapper<SyncLogEntity> sumWrapper = new LambdaQueryWrapper<>();
+        sumWrapper.select(SyncLogEntity::getWrittenCount)
+                 .ge(SyncLogEntity::getCreatedAt, todayStart)
+                 .lt(SyncLogEntity::getCreatedAt, todayEnd);
+        long todaySyncCount = syncLogMapper.selectObjs(sumWrapper).stream()
+                .filter(Objects::nonNull)
+                .mapToLong(o -> ((Number) o).longValue())
+                .sum();
+        vo.setTodaySyncCount(todaySyncCount);
 
         LambdaQueryWrapper<SyncLogEntity> failWrapper = new LambdaQueryWrapper<>();
         failWrapper.ge(SyncLogEntity::getCreatedAt, todayStart)
@@ -57,10 +67,10 @@ public class DashboardServiceImpl implements DashboardService {
         long todayFailures = syncLogMapper.selectCount(failWrapper);
         vo.setTodayFailures(todayFailures);
 
-        long todayTotal = vo.getTodaySyncCount();
-        if (todayTotal > 0) {
+        long todayTotalOps = syncLogMapper.selectCount(todayWrapper);
+        if (todayTotalOps > 0) {
             vo.setTushareSuccessRate(
-                Math.round((1.0 - (double) todayFailures / todayTotal) * 10000.0) / 100.0);
+                Math.round((1.0 - (double) todayFailures / todayTotalOps) * 10000.0) / 100.0);
         } else {
             vo.setTushareSuccessRate(100.0);
         }
