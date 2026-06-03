@@ -8,6 +8,7 @@ public enum TushareApi {
     DAILY("daily"),
     INCOME("income"),
     FINA_INDICATOR("fina_indicator"),
+    RT_MIN("rt_min"),
     RT_MIN_DAILY("rt_min_daily");
 
     private final String apiName;

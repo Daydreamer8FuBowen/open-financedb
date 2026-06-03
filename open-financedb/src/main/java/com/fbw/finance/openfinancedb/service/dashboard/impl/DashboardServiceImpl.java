@@ -5,6 +5,7 @@ import com.fbw.finance.openfinancedb.controller.dashboard.vo.resp.DailySyncTrend
 import com.fbw.finance.openfinancedb.controller.dashboard.vo.resp.DashboardSummaryRespVO;
 import com.fbw.finance.openfinancedb.model.entity.data.SyncLogEntity;
 import com.fbw.finance.openfinancedb.model.entity.data.StockInfoEntity;
+import com.fbw.finance.openfinancedb.model.enums.SyncDataType;
 import com.fbw.finance.openfinancedb.repository.data.mapper.StockInfoMapper;
 import com.fbw.finance.openfinancedb.repository.data.mapper.SyncLogMapper;
 import com.fbw.finance.openfinancedb.service.dashboard.DashboardService;
@@ -16,9 +17,20 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 
 @Service
 public class DashboardServiceImpl implements DashboardService {
+
+    private static final Set<String> KLINE_DATA_TYPES = Set.of(
+            SyncDataType.DAILY_KLINE.getCode(),
+            SyncDataType.KLINE_1M.getCode(),
+            SyncDataType.KLINE_5M.getCode(),
+            SyncDataType.KLINE_15M.getCode(),
+            SyncDataType.KLINE_30M.getCode(),
+            SyncDataType.KLINE_1H.getCode(),
+            SyncDataType.KLINE_1D.getCode()
+    );
 
     private final StockInfoMapper stockInfoMapper;
     private final SyncLogMapper syncLogMapper;
@@ -50,15 +62,7 @@ public class DashboardServiceImpl implements DashboardService {
         todayWrapper.ge(SyncLogEntity::getCreatedAt, todayStart)
                    .lt(SyncLogEntity::getCreatedAt, todayEnd);
 
-        LambdaQueryWrapper<SyncLogEntity> sumWrapper = new LambdaQueryWrapper<>();
-        sumWrapper.select(SyncLogEntity::getWrittenCount)
-                 .ge(SyncLogEntity::getCreatedAt, todayStart)
-                 .lt(SyncLogEntity::getCreatedAt, todayEnd);
-        long todaySyncCount = syncLogMapper.selectObjs(sumWrapper).stream()
-                .filter(Objects::nonNull)
-                .mapToLong(o -> ((Number) o).longValue())
-                .sum();
-        vo.setTodaySyncCount(todaySyncCount);
+        vo.setTodaySyncCount(sumKlineWrittenCount(todayStart, todayEnd));
 
         LambdaQueryWrapper<SyncLogEntity> failWrapper = new LambdaQueryWrapper<>();
         failWrapper.ge(SyncLogEntity::getCreatedAt, todayStart)
@@ -82,15 +86,23 @@ public class DashboardServiceImpl implements DashboardService {
             LocalDateTime dayStart = day.atStartOfDay();
             LocalDateTime dayEnd = dayStart.plusDays(1);
 
-            LambdaQueryWrapper<SyncLogEntity> dayWrapper = new LambdaQueryWrapper<>();
-            dayWrapper.ge(SyncLogEntity::getCreatedAt, dayStart)
-                     .lt(SyncLogEntity::getCreatedAt, dayEnd);
-            long count = syncLogMapper.selectCount(dayWrapper);
-
-            trend.add(new DailySyncTrendRespVO(day.format(fmt), count));
+            trend.add(new DailySyncTrendRespVO(day.format(fmt), sumKlineWrittenCount(dayStart, dayEnd)));
         }
         vo.setDailySyncTrend(trend);
 
         return vo;
     }
+
+    private long sumKlineWrittenCount(LocalDateTime startInclusive, LocalDateTime endExclusive) {
+        LambdaQueryWrapper<SyncLogEntity> sumWrapper = new LambdaQueryWrapper<>();
+        sumWrapper.select(SyncLogEntity::getWrittenCount)
+                .in(SyncLogEntity::getDataType, KLINE_DATA_TYPES)
+                .ge(SyncLogEntity::getCreatedAt, startInclusive)
+                .lt(SyncLogEntity::getCreatedAt, endExclusive);
+        return syncLogMapper.selectObjs(sumWrapper).stream()
+                .filter(Objects::nonNull)
+                .mapToLong(o -> ((Number) o).longValue())
+                .sum();
+    }
 }
+

@@ -29,24 +29,24 @@ management:
         token: ${INFLUXDB_TOKEN:your_influxdb_token}
         step: 10s
 
-tushare_live: ${TUSHARE_LIVE:false}
-tushare_token: ${TUSHARE_TOKEN:your_tushare_token}
-tushare_http_url: ${TUSHARE_HTTP_URL:http://tushare.xyz}
-
 finance:
-  redis:
-    enabled: ${FINANCE_REDIS_ENABLED:true}
-    host: ${REDIS_HOST:localhost}
-    port: ${REDIS_PORT:6379}
-    password: ${REDIS_PASSWORD:}
-    database: ${REDIS_DATABASE:0}
-    timeout: 3s
   startup:
     bootstrap-enabled: ${FINANCE_STARTUP_BOOTSTRAP:true}
   history-sync:
     enabled: ${FINANCE_HISTORY_SYNC:true}
     default-start-date: 2015-01-01
     idle-sleep: 30s
+  adj-factor-sync:
+    enabled: ${FINANCE_ADJ_FACTOR_SYNC:true}
+    cron: ${FINANCE_ADJ_FACTOR_SYNC_CRON:0 0 23 * * ?}
+    pool-size: ${FINANCE_ADJ_FACTOR_SYNC_POOL_SIZE:2}
+  kline-aggregation:
+    enabled: ${FINANCE_KLINE_AGGREGATION:true}
+    idle-sleep: 30s
+  realtime-sync:
+    enabled: ${FINANCE_REALTIME_SYNC:true}
+    pool-size: ${FINANCE_REALTIME_SYNC_POOL_SIZE:4}
+    retry-sleep-millis: ${FINANCE_REALTIME_SYNC_RETRY_SLEEP_MILLIS:1000}
   http:
     core-pool-size: 4
     max-pool-size: 16
@@ -61,6 +61,7 @@ finance:
     bucket: ${INFLUXDB_BUCKET:your_bucket}
     token: ${INFLUXDB_TOKEN:your_influxdb_token}
   tushare:
+    live: ${TUSHARE_LIVE:false}
     http-url: ${TUSHARE_HTTP_URL:http://tushare.xyz}
     token: ${TUSHARE_TOKEN:your_tushare_token}
     qps:
@@ -71,4 +72,5 @@ finance:
       daily: 2
       income: 1
       fina_indicator: 1
+      rt_min: 2
       rt_min_daily: 2

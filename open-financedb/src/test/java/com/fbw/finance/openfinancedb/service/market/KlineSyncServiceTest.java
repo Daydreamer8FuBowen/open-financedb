@@ -35,7 +35,9 @@ class KlineSyncServiceTest {
         service.persistMinuteSlice(new SyncSlice("000001.SZ", start, end), List.of(bar("000001.SZ", start)));
 
         assertEquals(1, klineRepository.writtenCount);
-        assertEquals(LocalDateTime.ofInstant(end, ZoneId.of("Asia/Shanghai")), stateRepository.entity.getLatestSyncTime());
+        assertEquals(LocalDateTime.ofInstant(start, ZoneId.of("Asia/Shanghai")), stateRepository.entity.getLatestSyncTime());
+        assertEquals(LocalDateTime.ofInstant(start.plusSeconds(60), ZoneId.of("Asia/Shanghai")),
+                stateRepository.entity.getCursorTime());
     }
 
     @Test
@@ -51,6 +53,7 @@ class KlineSyncServiceTest {
                 service.persistMinuteSlice(new SyncSlice("000001.SZ", start, end), List.of(bar("000001.SZ", start))));
 
         assertNull(stateRepository.entity.getLatestSyncTime());
+        assertNull(stateRepository.entity.getCursorTime());
     }
 
     private static KlineBar bar(String symbol, Instant time) {
@@ -88,7 +91,11 @@ class KlineSyncServiceTest {
 
         @Override
         public com.fbw.finance.openfinancedb.model.market.KlineCompleteness checkCompleteness(
-                String symbol, KlinePeriod period, Instant startTime, Instant endTime) {
+                String symbol,
+                KlinePeriod period,
+                Instant startTime,
+                Instant endTime,
+                java.util.Collection<Instant> expectedTimes) {
             return new com.fbw.finance.openfinancedb.model.market.KlineCompleteness(false, 0, 0);
         }
     }
@@ -99,7 +106,7 @@ class KlineSyncServiceTest {
         private FakeStockSyncStateRepository() {
             entity.setId(1L);
             entity.setSymbol("000001.SZ");
-            entity.setDataType(SyncDataType.MINUTE_1M.getCode());
+            entity.setDataType(SyncDataType.KLINE_1M.getCode());
         }
 
         @Override
@@ -110,6 +117,7 @@ class KlineSyncServiceTest {
         @Override
         public boolean update(StockSyncStateEntity entity) {
             this.entity.setLatestSyncTime(entity.getLatestSyncTime());
+            this.entity.setCursorTime(entity.getCursorTime());
             this.entity.setSyncStatus(entity.getSyncStatus());
             return true;
         }
@@ -132,6 +140,11 @@ class KlineSyncServiceTest {
         @Override
         public PageResult<StockSyncStateEntity> page(StockSyncStatePageReqVO reqVO) {
             return new PageResult<>(List.of(entity), 1L);
+        }
+
+        @Override
+        public List<StockSyncStateEntity> findBySymbolsAndDataType(List<String> symbols, String dataType) {
+            return List.of(entity);
         }
     }
 }

@@ -36,6 +36,11 @@ const routes = [
         component: () => import('@/pages/SyncLogPage.vue'),
       },
       {
+        path: 'realtime-kline-monitor',
+        name: 'RealtimeKlineMonitor',
+        component: () => import('@/pages/RealtimeKlineMonitorPage.vue'),
+      },
+      {
         path: 'trade-calendars',
         name: 'TradeCalendars',
         component: () => import('@/pages/TradeCalendarPage.vue'),

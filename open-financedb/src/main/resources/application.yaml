@@ -15,7 +15,7 @@ spring:
   data:
     redis:
       host: ${REDIS_HOST:localhost}
-      port: ${REDIS_PORT:3306}
+      port: ${REDIS_PORT:6379}
       password: ${REDIS_PASSWORD:}
       database: ${REDIS_DATABASE:0}
       timeout: 3s
@@ -31,10 +31,7 @@ logging:
     com.fbw.finance.openfinancedb: INFO
 
 finance:
-  redis:
-    enabled: ${FINANCE_REDIS_ENABLED:true}
-    host: ${REDIS_HOST:localhost}
-    port: ${REDIS_PORT:3306}
-    password: ${REDIS_PASSWORD:}
-    database: ${REDIS_DATABASE:0}
-    timeout: 3s
+  tushare:
+    live: ${TUSHARE_LIVE:false}
+    http-url: ${TUSHARE_HTTP_URL:http://tushare.xyz}
+    token: ${TUSHARE_TOKEN:}

@@ -21,6 +21,8 @@ public class KlineQueryReqVO {
     @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME)
     private OffsetDateTime endTime;
 
+    private Boolean adjusted = false;
+
     public String getSymbol() {
         return symbol;
     }
@@ -51,5 +53,13 @@ public class KlineQueryReqVO {
 
     public void setEndTime(OffsetDateTime endTime) {
         this.endTime = endTime;
+    }
+
+    public Boolean getAdjusted() {
+        return adjusted;
+    }
+
+    public void setAdjusted(Boolean adjusted) {
+        this.adjusted = adjusted;
     }
 }

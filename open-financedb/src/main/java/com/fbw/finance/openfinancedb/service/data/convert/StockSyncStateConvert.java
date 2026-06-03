@@ -21,7 +21,6 @@ public final class StockSyncStateConvert {
         entity.setDataType(reqVO.getDataType());
         entity.setStartTime(reqVO.getStartTime());
         entity.setLatestSyncTime(reqVO.getLatestSyncTime());
-        entity.setTargetSyncTime(reqVO.getTargetSyncTime());
         entity.setLastSuccessTime(reqVO.getLastSuccessTime());
         entity.setLastFailedTime(reqVO.getLastFailedTime());
         entity.setSyncStatus(reqVO.getSyncStatus());
@@ -37,7 +36,6 @@ public final class StockSyncStateConvert {
         respVO.setDataType(entity.getDataType());
         respVO.setStartTime(entity.getStartTime());
         respVO.setLatestSyncTime(entity.getLatestSyncTime());
-        respVO.setTargetSyncTime(entity.getTargetSyncTime());
         respVO.setLastSuccessTime(entity.getLastSuccessTime());
         respVO.setLastFailedTime(entity.getLastFailedTime());
         respVO.setSyncStatus(entity.getSyncStatus());
@@ -54,7 +52,6 @@ public final class StockSyncStateConvert {
         entity.setDataType(reqVO.getDataType());
         entity.setStartTime(reqVO.getStartTime());
         entity.setLatestSyncTime(reqVO.getLatestSyncTime());
-        entity.setTargetSyncTime(reqVO.getTargetSyncTime());
         entity.setLastSuccessTime(reqVO.getLastSuccessTime());
         entity.setLastFailedTime(reqVO.getLastFailedTime());
         entity.setSyncStatus(reqVO.getSyncStatus());

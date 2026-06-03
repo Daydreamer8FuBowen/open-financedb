@@ -20,6 +20,12 @@ public class StockInfoRespVO {
     private LocalDate delistDate;
     private String status;
     private Boolean isRealtimeSyncEnabled;
+    private String syncDataType;
+    private String syncStatus;
+    private LocalDateTime syncStartTime;
+    private LocalDateTime syncLatestTime;
+    private Integer syncProgressPercent;
+    private String syncLastError;
     private String actEntType;
     private String dataSource;
     private LocalDate latestQuoteDate;

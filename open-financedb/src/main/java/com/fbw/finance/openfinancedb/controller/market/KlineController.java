@@ -1,14 +1,15 @@
 package com.fbw.finance.openfinancedb.controller.market;
 
 import com.fbw.finance.openfinancedb.controller.market.vo.req.KlineQueryReqVO;
+import com.fbw.finance.openfinancedb.controller.market.vo.resp.KlineQueryRespVO;
 import com.fbw.finance.openfinancedb.controller.market.vo.resp.KlineRespVO;
 import com.fbw.finance.openfinancedb.framework.web.CommonResult;
 import com.fbw.finance.openfinancedb.model.market.KlineBar;
 import com.fbw.finance.openfinancedb.model.market.KlinePeriod;
 import com.fbw.finance.openfinancedb.model.market.KlineQuery;
+import com.fbw.finance.openfinancedb.model.market.KlineQueryResult;
 import com.fbw.finance.openfinancedb.service.market.KlineQueryService;
 import jakarta.validation.Valid;
-import java.util.List;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.ModelAttribute;
@@ -27,14 +28,22 @@ public class KlineController {
     }
 
     @GetMapping
-    public CommonResult<List<KlineRespVO>> query(@Valid @ModelAttribute KlineQueryReqVO reqVO) {
+    public CommonResult<KlineQueryRespVO> query(@Valid @ModelAttribute KlineQueryReqVO reqVO) {
         KlineQuery query = new KlineQuery(
                 reqVO.getSymbol(),
                 KlinePeriod.fromCode(reqVO.getPeriod()),
                 reqVO.getStartTime().toInstant(),
-                reqVO.getEndTime().toInstant()
+                reqVO.getEndTime().toInstant(),
+                Boolean.TRUE.equals(reqVO.getAdjusted())
         );
-        return CommonResult.success(klineQueryService.query(query).stream().map(this::toRespVO).toList());
+        KlineQueryResult result = klineQueryService.queryResult(query);
+        return CommonResult.success(new KlineQueryRespVO(
+                result.list().stream().map(this::toRespVO).toList(),
+                result.completeness().complete(),
+                result.completeness().expectedCount(),
+                result.completeness().actualCount(),
+                result.adjusted()
+        ));
     }
 
     private KlineRespVO toRespVO(KlineBar bar) {

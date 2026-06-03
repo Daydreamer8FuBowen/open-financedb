@@ -25,6 +25,7 @@ const menuGroups = [
     label: '监控',
     items: [
       { path: '/sync-logs', label: '同步日志', icon: '📋' },
+      { path: '/realtime-kline-monitor', label: 'Realtime Kline', icon: 'RT' },
     ],
   },
 ]

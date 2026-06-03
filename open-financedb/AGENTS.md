@@ -124,7 +124,7 @@ InfluxDB repository 接口（`KlineRepository`、`AdjFactorRepository`）有两�
   - `TushareFinancialDataSourceImpl`：`income`
 - 已验证 7 个 API：`stock_basic`、`daily`、`income`、`fina_indicator`、`stk_mins`、`rt_min_daily`、`adj_factor`
 - 契约文档：`docs/tushare-api.md`
-- `application-dev.yaml` 配置：`tushare_live`、`tushare_token`、`tushare_http_url`、按 API 的 `qps` 限制
+- `application-dev.yaml` 配置：`finance.tushare.live`、`finance.tushare.token`、`finance.tushare.http-url`、按 API 的 `qps` 限制
 
 ### 自定义 HTTP 客户端
 
@@ -136,15 +136,17 @@ InfluxDB repository 接口（`KlineRepository`、`AdjFactorRepository`）有两�
 1. `StockInfoBootstrapService.refreshFromTushare()`：从 Tushare 拉取全量股票列表 upsert 到 MySQL
 2. `TradeCalendarBootstrapService.initializeIfEmpty()`：若 trade_calendar 表为空则从 Tushare 拉取
 3. `HistoryKlineSyncWorker.start()`：启动后台历史 K 线同步线程
+4. `KlineAggregationWorker.start()`：启动 5 核心固定线程池，基于完整 1 分钟线增量聚合 `5m/15m/30m/1h/1d`
 
-通过 `finance.startup.bootstrap-enabled` 和 `finance.history-sync.enabled` 控制开关。
+通过 `finance.startup.bootstrap-enabled`、`finance.history-sync.enabled` 和 `finance.kline-aggregation.enabled` 控制开关。
 
 ## 配置文件
 
 - `application.yaml`：公共配置（profile 默认 dev，HikariCP，Jackson Asia/Shanghai，MyBatis-Plus 下划线转驼峰）
 - `application-dev.yaml`：开发环境（MySQL 连接、InfluxDB、Tushare token、finance.* 配置）
-- `application-build.yaml`：构建环境（同结构，不含 `tushare_live`）
-- `sql/data-foundation.sql`：5 张 MySQL 表的 DDL
+- `application-build.yaml`：构建环境（同结构，不含 `finance.tushare.live`）
+- `src/main/resources/sql/data-foundation.sql`：5 张 MySQL 表的 DDL
+- `src/main/resources/sql/2026-05-27-add-stock-sync-state-cursors.sql`：为既有 `stock_sync_state` 增加 `cursor_time`、`source_latest_time` 游标字段
 
 注意：配置文件包含硬编码凭据，为已知开发阶段状态。
 

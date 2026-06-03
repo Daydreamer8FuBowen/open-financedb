@@ -1,7 +1,12 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import http from '@/api'
-import { getStockInfos, updateStockInfo, batchUpdateSyncEnabled } from '@/api/stockInfo'
+import {
+  getStockInfos,
+  updateStockInfo,
+  batchUpdateSyncEnabled,
+  batchUpdateSyncEnabledByQuery,
+} from '@/api/stockInfo'
 
 const list = ref([])
 const total = ref(0)
@@ -9,11 +14,12 @@ const pageNo = ref(1)
 const pageSize = ref(20)
 const loading = ref(false)
 const selectedIds = ref(new Set())
+const selectedAllMatching = ref(false)
 
 const filterSymbol = ref('')
 const filterName = ref('')
 const filterExchange = ref('')
-const filterStatus = ref('')
+const filterStatus = ref('LISTED')
 const filterSync = ref(null)
 
 const exchanges = ref([])
@@ -25,45 +31,48 @@ async function loadExchanges() {
   } catch { /* ignore */ }
 }
 
+function buildQueryParams(includePage = true) {
+  const params = {}
+  if (includePage) {
+    params.pageNo = pageNo.value
+    params.pageSize = pageSize.value
+  }
+  if (filterSymbol.value) params.symbol = filterSymbol.value
+  if (filterName.value) params.name = filterName.value
+  if (filterExchange.value) params.exchange = filterExchange.value
+  if (filterStatus.value) params.status = filterStatus.value
+  if (filterSync.value !== null && filterSync.value !== '') params.isRealtimeSyncEnabled = filterSync.value
+  return params
+}
+
 async function loadData() {
   loading.value = true
   try {
-    const params = {
-      pageNo: pageNo.value,
-      pageSize: pageSize.value,
-    }
-    if (filterSymbol.value) params.symbol = filterSymbol.value
-    if (filterName.value) params.name = filterName.value
-    if (filterExchange.value) params.exchange = filterExchange.value
-    if (filterStatus.value) params.status = filterStatus.value
-    if (filterSync.value !== null && filterSync.value !== '') params.isRealtimeSyncEnabled = filterSync.value
-
-    const res = await getStockInfos(params)
+    const res = await getStockInfos(buildQueryParams())
     list.value = res.data?.list || []
     total.value = res.data?.total || 0
     selectedIds.value = new Set()
+    selectedAllMatching.value = false
   } finally {
     loading.value = false
   }
 }
 
 function toggleSelect(id) {
-  const s = new Set(selectedIds.value)
-  if (s.has(id)) s.delete(id)
-  else s.add(id)
-  selectedIds.value = s
+  selectedAllMatching.value = false
+  const next = new Set(selectedIds.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  selectedIds.value = next
 }
 
-function toggleAll() {
-  if (selectedIds.value.size === list.value.length) {
-    selectedIds.value = new Set()
-  } else {
-    selectedIds.value = new Set(list.value.map(r => r.id))
-  }
+function toggleAllMatching() {
+  selectedIds.value = new Set()
+  selectedAllMatching.value = !selectedAllMatching.value
 }
 
-function isAllSelected() {
-  return list.value.length > 0 && selectedIds.value.size === list.value.length
+function isRowSelected(id) {
+  return selectedAllMatching.value || selectedIds.value.has(id)
 }
 
 async function handleSingleToggle(row) {
@@ -87,11 +96,18 @@ async function handleSingleToggle(row) {
 }
 
 async function handleBatchUpdate(enabled) {
-  if (selectedIds.value.size === 0) return
-  await batchUpdateSyncEnabled({
-    ids: Array.from(selectedIds.value),
-    enabled,
-  })
+  if (!selectedAllMatching.value && selectedIds.value.size === 0) return
+  if (selectedAllMatching.value) {
+    await batchUpdateSyncEnabledByQuery({
+      ...buildQueryParams(false),
+      enabled,
+    })
+  } else {
+    await batchUpdateSyncEnabled({
+      ids: Array.from(selectedIds.value),
+      enabled,
+    })
+  }
   await loadData()
 }
 
@@ -105,7 +121,34 @@ function handlePageChange(p) {
   loadData()
 }
 
-const totalPages = computed(() => Math.ceil(total.value / pageSize.value))
+function statusText(status) {
+  return {
+    LISTED: '上市',
+    DELISTED: '退市',
+    SUSPENDED: '停牌',
+  }[status] || status || '-'
+}
+
+function syncStatusText(status) {
+  return {
+    PENDING: '等待中',
+    RUNNING: '同步中',
+    SUCCESS: '已完成',
+    FAILED: '失败',
+  }[status] || status || '无记录'
+}
+
+function formatTime(value) {
+  if (!value) return '-'
+  return String(value).replace('T', ' ').slice(0, 16)
+}
+
+const totalPages = computed(() => Math.max(Math.ceil(total.value / pageSize.value), 1))
+const selectedCountText = computed(() => {
+  if (selectedAllMatching.value) return `已选择当前筛选下全部 ${total.value.toLocaleString()} 只股票`
+  return `已选择 ${selectedIds.value.size} 只股票`
+})
+const hasSelection = computed(() => selectedAllMatching.value || selectedIds.value.size > 0)
 
 onMounted(() => {
   loadExchanges()
@@ -117,7 +160,7 @@ onMounted(() => {
   <div>
     <div class="page-header">
       <h2>股票信息管理</h2>
-      <p>管理股票基础信息及历史数据同步开关</p>
+      <p>默认只查看上市股票；全选会作用于当前筛选条件下的全部结果</p>
     </div>
 
     <div class="card mb-16">
@@ -129,8 +172,8 @@ onMounted(() => {
           <option v-for="ex in exchanges" :key="ex.code" :value="ex.code">{{ ex.label }}</option>
         </select>
         <select v-model="filterStatus" class="form-select">
-          <option value="">全部状态</option>
           <option value="LISTED">上市</option>
+          <option value="">全部状态</option>
           <option value="DELISTED">退市</option>
           <option value="SUSPENDED">停牌</option>
         </select>
@@ -143,43 +186,61 @@ onMounted(() => {
       </div>
     </div>
 
-    <div v-if="selectedIds.size > 0" class="batch-toolbar">
-      <span>已选 <strong>{{ selectedIds.size }}</strong> 项</span>
+    <div v-if="hasSelection" class="batch-toolbar">
+      <span>{{ selectedCountText }}</span>
       <button class="btn btn-primary btn-sm" @click="handleBatchUpdate(true)">开启同步</button>
       <button class="btn btn-secondary btn-sm" @click="handleBatchUpdate(false)">关闭同步</button>
     </div>
 
-    <div class="card" style="padding:0;overflow:hidden;">
+    <div class="card table-card">
       <table class="data-table">
         <thead>
           <tr>
-            <th style="width:40px;">
-              <input type="checkbox" :checked="isAllSelected()" @change="toggleAll">
+            <th class="check-cell">
+              <input type="checkbox" :checked="selectedAllMatching" @change="toggleAllMatching">
             </th>
             <th>Symbol</th>
             <th>名称</th>
             <th>交易所</th>
             <th>行业</th>
             <th>状态</th>
-            <th style="text-align:center;">实时同步</th>
+            <th>同步进度</th>
+            <th class="center-cell">实时同步</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="row in list" :key="row.id" :class="{ selected: selectedIds.has(row.id) }">
-            <td>
-              <input type="checkbox" :checked="selectedIds.has(row.id)" @change="toggleSelect(row.id)">
+          <tr v-for="row in list" :key="row.id" :class="{ selected: isRowSelected(row.id) }">
+            <td class="check-cell">
+              <input type="checkbox" :checked="isRowSelected(row.id)" @change="toggleSelect(row.id)">
             </td>
             <td class="text-mono">{{ row.symbol }}</td>
             <td>{{ row.name }}</td>
             <td><span v-if="row.exchange" class="badge badge-info">{{ row.exchange }}</span></td>
             <td>{{ row.industry || '-' }}</td>
             <td>
-              <span v-if="row.status === 'LISTED'" class="badge badge-success">上市</span>
-              <span v-else-if="row.status === 'DELISTED'" class="badge badge-danger">退市</span>
-              <span v-else-if="row.status === 'SUSPENDED'" class="badge badge-warning">停牌</span>
-              <span v-else>{{ row.status }}</span>
+              <span class="badge" :class="{
+                'badge-success': row.status === 'LISTED',
+                'badge-danger': row.status === 'DELISTED',
+                'badge-warning': row.status === 'SUSPENDED',
+              }">{{ statusText(row.status) }}</span>
             </td>
-            <td style="text-align:center;">
+            <td>
+              <div class="progress-cell">
+                <div class="progress-top">
+                  <span>{{ syncStatusText(row.syncStatus) }}</span>
+                  <strong v-if="row.syncProgressPercent !== null && row.syncProgressPercent !== undefined">
+                    {{ row.syncProgressPercent }}%
+                  </strong>
+                </div>
+                <div class="progress-bar">
+                  <span :style="{ width: `${row.syncProgressPercent ?? 0}%` }"></span>
+                </div>
+                <div class="progress-meta">
+                  {{ formatTime(row.syncLatestTime) }} / {{ formatTime(row.syncTargetTime) }}
+                </div>
+              </div>
+            </td>
+            <td class="center-cell">
               <label class="switch" @click.stop="handleSingleToggle(row)">
                 <input type="checkbox" :checked="row.isRealtimeSyncEnabled">
                 <span class="slider"></span>
@@ -187,12 +248,15 @@ onMounted(() => {
             </td>
           </tr>
           <tr v-if="!list.length && !loading">
-            <td colspan="7" style="text-align:center;padding:40px;color:#94a3b8;">暂无数据</td>
+            <td colspan="8" class="empty-cell">暂无数据</td>
+          </tr>
+          <tr v-if="loading">
+            <td colspan="8" class="empty-cell">加载中...</td>
           </tr>
         </tbody>
       </table>
 
-      <div class="pagination" style="padding:10px 16px;">
+      <div class="pagination table-pagination">
         <span>共 {{ total }} 条</span>
         <div class="pagination-btns">
           <button :disabled="pageNo <= 1" @click="handlePageChange(pageNo - 1)">上一页</button>
@@ -210,18 +274,20 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.filter-row {
-  display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
-}
-.filter-input {
-  padding: 8px 12px; border: 1px solid #e2e8f0; border-radius: 6px;
-  font-size: 13px; outline: none; width: 160px;
-}
-.filter-input:focus { border-color: #6366f1; }
-.batch-toolbar {
-  display: flex; align-items: center; gap: 10px; padding: 10px 16px;
-  background: #eef2ff; border: 1px solid #c7d2fe; border-radius: 8px;
-  margin-bottom: 12px; font-size: 13px; color: #4338ca;
-}
+.filter-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.filter-input { padding: 8px 12px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 13px; outline: none; width: 160px; }
+.filter-input:focus { border-color: #4f46e5; }
+.batch-toolbar { display: flex; align-items: center; gap: 10px; padding: 10px 16px; background: #eef2ff; border: 1px solid #c7d2fe; border-radius: 8px; margin-bottom: 12px; font-size: 13px; color: #3730a3; }
+.table-card { padding: 0; overflow: hidden; }
+.check-cell { width: 42px; text-align: center; }
+.center-cell { text-align: center; }
 tr.selected { background: #f8f4ff; }
+.progress-cell { min-width: 190px; }
+.progress-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 12px; color: #334155; margin-bottom: 5px; }
+.progress-top strong { color: #2563eb; }
+.progress-bar { width: 100%; height: 7px; background: #e2e8f0; border-radius: 999px; overflow: hidden; }
+.progress-bar span { display: block; height: 100%; background: #2563eb; border-radius: inherit; min-width: 0; }
+.progress-meta { margin-top: 4px; font-size: 11px; color: #94a3b8; white-space: nowrap; }
+.empty-cell { text-align: center; padding: 40px; color: #94a3b8; }
+.table-pagination { padding: 10px 16px; }
 </style>

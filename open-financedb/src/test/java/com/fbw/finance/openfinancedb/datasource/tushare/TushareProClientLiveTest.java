@@ -18,18 +18,21 @@ class TushareProClientLiveTest {
     @Test
     void shouldCallProApis() throws Exception {
         assumeTrue(Boolean.parseBoolean(firstNonBlank(
+                readProfileProperty("finance.tushare.live"),
                 readProfileProperty("tushare_live"),
                 System.getenv("TUSHARE_LIVE"),
                 "false"
         )));
 
         String token = firstNonBlank(
+                readProfileProperty("finance.tushare.token"),
                 readProfileProperty("tushare_token"),
                 System.getenv("TUSHARE_TOKEN")
         );
         assumeTrue(token != null && !token.isBlank());
 
         String httpUrl = firstNonBlank(
+                normalizePlaceholder(readProfileProperty("finance.tushare.http-url")),
                 normalizePlaceholder(readProfileProperty("tushare_http_url")),
                 System.getenv("TUSHARE_HTTP_URL"),
                 "https://api.tushare.pro"

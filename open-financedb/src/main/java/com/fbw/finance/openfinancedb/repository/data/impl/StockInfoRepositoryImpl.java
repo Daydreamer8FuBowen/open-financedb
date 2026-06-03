@@ -108,6 +108,13 @@ public class StockInfoRepositoryImpl implements StockInfoRepository {
     }
 
     @Override
+    public List<StockInfoEntity> list(StockInfoPageReqVO reqVO) {
+        LambdaQueryWrapper<StockInfoEntity> queryWrapper = buildQueryWrapper(reqVO)
+                .orderByAsc(StockInfoEntity::getId);
+        return stockInfoMapper.selectList(queryWrapper);
+    }
+
+    @Override
     public PageResult<StockInfoEntity> page(StockInfoPageReqVO reqVO) {
         LambdaQueryWrapper<StockInfoEntity> queryWrapper = buildQueryWrapper(reqVO)
                 .orderByDesc(StockInfoEntity::getId);
@@ -122,6 +129,14 @@ public class StockInfoRepositoryImpl implements StockInfoRepository {
         return stockInfoMapper.update(null, updateWrapper);
     }
 
+    @Override
+    public int batchUpdateSyncEnabledByQuery(StockInfoPageReqVO reqVO, Boolean enabled) {
+        LambdaUpdateWrapper<StockInfoEntity> updateWrapper = new LambdaUpdateWrapper<>();
+        applyQueryConditions(updateWrapper, reqVO);
+        updateWrapper.set(StockInfoEntity::getIsRealtimeSyncEnabled, enabled);
+        return stockInfoMapper.update(null, updateWrapper);
+    }
+
     private LambdaQueryWrapper<StockInfoEntity> buildQueryWrapper(StockInfoPageReqVO reqVO) {
         LambdaQueryWrapper<StockInfoEntity> queryWrapper = RepositoryQueryHelper.lambdaQuery();
         RepositoryQueryHelper.likeIfHasText(queryWrapper, StockInfoEntity::getSymbol, reqVO.getSymbol());
@@ -132,5 +147,29 @@ public class StockInfoRepositoryImpl implements StockInfoRepository {
         RepositoryQueryHelper.eqIfHasText(queryWrapper, StockInfoEntity::getStatus, reqVO.getStatus());
         RepositoryQueryHelper.eqIfPresent(queryWrapper, StockInfoEntity::getIsRealtimeSyncEnabled, reqVO.getIsRealtimeSyncEnabled());
         return queryWrapper;
+    }
+
+    private void applyQueryConditions(LambdaUpdateWrapper<StockInfoEntity> updateWrapper, StockInfoPageReqVO reqVO) {
+        if (org.springframework.util.StringUtils.hasText(reqVO.getSymbol())) {
+            updateWrapper.like(StockInfoEntity::getSymbol, reqVO.getSymbol());
+        }
+        if (org.springframework.util.StringUtils.hasText(reqVO.getName())) {
+            updateWrapper.like(StockInfoEntity::getName, reqVO.getName());
+        }
+        if (org.springframework.util.StringUtils.hasText(reqVO.getExchange())) {
+            updateWrapper.eq(StockInfoEntity::getExchange, reqVO.getExchange());
+        }
+        if (org.springframework.util.StringUtils.hasText(reqVO.getMarket())) {
+            updateWrapper.eq(StockInfoEntity::getMarket, reqVO.getMarket());
+        }
+        if (org.springframework.util.StringUtils.hasText(reqVO.getType())) {
+            updateWrapper.eq(StockInfoEntity::getType, reqVO.getType());
+        }
+        if (org.springframework.util.StringUtils.hasText(reqVO.getStatus())) {
+            updateWrapper.eq(StockInfoEntity::getStatus, reqVO.getStatus());
+        }
+        if (reqVO.getIsRealtimeSyncEnabled() != null) {
+            updateWrapper.eq(StockInfoEntity::getIsRealtimeSyncEnabled, reqVO.getIsRealtimeSyncEnabled());
+        }
     }
 }

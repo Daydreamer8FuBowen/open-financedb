@@ -1,31 +1,16 @@
 package com.fbw.finance.openfinancedb.framework.config;
 
 import java.time.Duration;
-
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
-@ConfigurationProperties(prefix = "finance.redis")
-public class FinanceRedisProperties {
+@ConfigurationProperties(prefix = "spring.data.redis")
+public class SpringRedisProperties {
 
-    private boolean enabled = false;
-
-    private String host = "localhost";
-
+    private String host;
     private int port = 6379;
-
     private String password;
-
     private int database = 0;
-
     private Duration timeout = Duration.ofSeconds(3);
-
-    public boolean isEnabled() {
-        return enabled;
-    }
-
-    public void setEnabled(boolean enabled) {
-        this.enabled = enabled;
-    }
 
     public String getHost() {
         return host;

@@ -4,6 +4,8 @@ import com.fbw.finance.openfinancedb.framework.http.HttpPriority;
 import com.fbw.finance.openfinancedb.model.market.KlineBar;
 import com.fbw.finance.openfinancedb.model.market.KlinePeriod;
 import java.math.BigDecimal;
+import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -13,6 +15,11 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
+import org.redisson.api.RBucket;
+import org.redisson.api.RLock;
+import org.redisson.api.RedissonClient;
+import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Component;
 
 @Component
@@ -22,11 +29,19 @@ public class TushareKlineDataSourceImpl implements TushareKlineDataSource {
     private static final DateTimeFormatter TRADE_TIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
     private static final DateTimeFormatter REQUEST_TIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
     private static final String STK_MINS_FIELDS = "ts_code,trade_time,open,high,low,close,vol,amount";
-
+    private static final String RT_MIN_FIELDS = "ts_code,time,open,high,low,close,vol,amount";
+    private static final Duration REALTIME_DAILY_CACHE_TTL = Duration.ofSeconds(10);
+    private static final String REALTIME_DAILY_CACHE_KEY_PREFIX = "tushare:rt-min-daily:cache:";
+    private static final String REALTIME_DAILY_LOCK_KEY_PREFIX = "tushare:rt-min-daily:lock:";
+    private static final long REALTIME_DAILY_LOCK_LEASE_SECONDS = 15L;
     private final TushareClient tushareClient;
+    private final Clock clock;
+    private final RedissonClient redissonClient;
 
-    public TushareKlineDataSourceImpl(TushareClient tushareClient) {
+    public TushareKlineDataSourceImpl(TushareClient tushareClient, Clock clock, @Nullable RedissonClient redissonClient) {
         this.tushareClient = tushareClient;
+        this.clock = clock;
+        this.redissonClient = redissonClient;
     }
 
     @Override
@@ -39,13 +54,22 @@ public class TushareKlineDataSourceImpl implements TushareKlineDataSource {
             String symbol,
             LocalDateTime startTimeInclusive,
             LocalDateTime endTimeExclusive) {
+        return fetchMinuteBars(symbol, startTimeInclusive, endTimeExclusive, KlinePeriod.MINUTE_1);
+    }
+
+    @Override
+    public List<KlineBar> fetchMinuteBars(
+            String symbol,
+            LocalDateTime startTimeInclusive,
+            LocalDateTime endTimeExclusive,
+            KlinePeriod period) {
         if (!startTimeInclusive.isBefore(endTimeExclusive)) {
             return List.of();
         }
 
         Map<String, Object> params = new LinkedHashMap<>();
         params.put("ts_code", symbol);
-        params.put("freq", "1min");
+        params.put("freq", toHistoricalFreq(period));
         params.put("start_date", startTimeInclusive.format(REQUEST_TIME_FORMATTER));
         // Tushare's time range is requested with second precision. The public data-source
         // contract is half-open at minute precision: [startTimeInclusive, endTimeExclusive).
@@ -62,12 +86,129 @@ public class TushareKlineDataSourceImpl implements TushareKlineDataSource {
 
         Instant startInstant = startTimeInclusive.atZone(MARKET_ZONE).toInstant();
         Instant endInstant = endTimeExclusive.atZone(MARKET_ZONE).toInstant();
-        return toBars(response).stream()
+        return toHistoricalBars(response, period).stream()
                 .filter(bar -> !bar.time().isBefore(startInstant) && bar.time().isBefore(endInstant))
                 .toList();
     }
 
-    private List<KlineBar> toBars(TushareResponse response) {
+    @Override
+    public List<KlineBar> fetchRealtimeMinuteBars(List<String> symbols, KlinePeriod period) {
+        Map<String, Object> params = new LinkedHashMap<>();
+        params.put("ts_code", normalizeRealtimeSymbols(symbols));
+        params.put("freq", toRealtimeFreq(period));
+
+        TushareResponse response = tushareClient.callAsync(new TushareRequest(
+                TushareApi.RT_MIN.apiName(),
+                params,
+                RT_MIN_FIELDS,
+                HttpPriority.HIGH
+        )).join();
+
+        return toRealtimeBars(response, period);
+    }
+
+    @Override
+    public List<KlineBar> fetchRealtimeDailyMinuteBars(String symbol, KlinePeriod period) {
+        String cacheKey = realtimeDailyCacheKey(symbol, period);
+        List<KlineBar> cachedBars = getCachedRealtimeDailyBars(cacheKey);
+        if (cachedBars != null) {
+            return cachedBars;
+        }
+        if (redissonClient == null) {
+            return fetchAndCacheRealtimeDailyMinuteBars(symbol, period, cacheKey);
+        }
+        RLock lock = redissonClient.getLock(realtimeDailyLockKey(symbol, period));
+        lock.lock(REALTIME_DAILY_LOCK_LEASE_SECONDS, TimeUnit.SECONDS);
+        try {
+            cachedBars = getCachedRealtimeDailyBars(cacheKey);
+            if (cachedBars != null) {
+                return cachedBars;
+            }
+            return fetchAndCacheRealtimeDailyMinuteBars(symbol, period, cacheKey);
+        } finally {
+            if (lock.isHeldByCurrentThread()) {
+                lock.unlock();
+            }
+        }
+    }
+
+    private List<KlineBar> fetchAndCacheRealtimeDailyMinuteBars(String symbol, KlinePeriod period, String cacheKey) {
+        Map<String, Object> params = new LinkedHashMap<>();
+        params.put("ts_code", normalizeRealtimeSymbols(List.of(symbol)));
+        params.put("freq", toRealtimeFreq(period));
+
+        TushareResponse response = tushareClient.callAsync(new TushareRequest(
+                TushareApi.RT_MIN_DAILY.apiName(),
+                params,
+                RT_MIN_FIELDS,
+                HttpPriority.HIGH
+        )).join();
+
+        List<KlineBar> bars = toRealtimeBars(response, period);
+        putCachedRealtimeDailyBars(cacheKey, bars);
+        return bars;
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<KlineBar> getCachedRealtimeDailyBars(String cacheKey) {
+        if (redissonClient == null) {
+            return null;
+        }
+        RBucket<List<KlineBar>> bucket = redissonClient.getBucket(cacheKey);
+        List<KlineBar> bars = bucket.get();
+        return bars == null ? null : List.copyOf(bars);
+    }
+
+    private void putCachedRealtimeDailyBars(String cacheKey, List<KlineBar> bars) {
+        if (redissonClient == null) {
+            return;
+        }
+        redissonClient.getBucket(cacheKey).set(List.copyOf(bars), REALTIME_DAILY_CACHE_TTL);
+    }
+
+    private String realtimeDailyCacheKey(String symbol, KlinePeriod period) {
+        return REALTIME_DAILY_CACHE_KEY_PREFIX + symbol + ":" + period.getCode();
+    }
+
+    private String realtimeDailyLockKey(String symbol, KlinePeriod period) {
+        return REALTIME_DAILY_LOCK_KEY_PREFIX + symbol + ":" + period.getCode();
+    }
+
+    private String normalizeRealtimeSymbols(List<String> symbols) {
+        if (symbols == null || symbols.isEmpty()) {
+            throw new IllegalArgumentException("symbols must not be empty");
+        }
+
+        List<String> normalizedSymbols = new ArrayList<>();
+        for (String rawSymbol : symbols) {
+            if (rawSymbol == null) {
+                throw new IllegalArgumentException("symbol must not be blank");
+            }
+            for (String candidate : rawSymbol.split(",")) {
+                String symbol = candidate.trim();
+                if (symbol.isBlank()) {
+                    throw new IllegalArgumentException("symbol must not be blank");
+                }
+                normalizedSymbols.add(symbol);
+            }
+        }
+
+        if (normalizedSymbols.size() > REALTIME_MINUTE_MAX_SYMBOLS) {
+            throw new IllegalArgumentException(
+                    "rt_min supports at most " + REALTIME_MINUTE_MAX_SYMBOLS + " symbols per request");
+        }
+        return String.join(",", normalizedSymbols);
+    }
+
+    private List<KlineBar> toHistoricalBars(TushareResponse response, KlinePeriod period) {
+        return toBars(response, "trade_time", period, true);
+    }
+
+    private List<KlineBar> toRealtimeBars(TushareResponse response, KlinePeriod period) {
+        return toBars(response, "time", period, false);
+    }
+
+    private List<KlineBar> toBars(TushareResponse response, String timeField, KlinePeriod period, boolean historical) {
         if (response.data() == null || response.data().fields() == null || response.data().items() == null) {
             return List.of();
         }
@@ -81,27 +222,60 @@ public class TushareKlineDataSourceImpl implements TushareKlineDataSource {
 
         List<KlineBar> bars = new ArrayList<>();
         for (List<Object> item : response.data().items()) {
+            String tradeTime = string(item, fieldIndex, timeField);
+            if (tradeTime.isBlank()) {
+                continue;
+            }
+            Instant barTime = parseTradeTime(tradeTime);
             bars.add(new KlineBar(
                     string(item, fieldIndex, "ts_code"),
-                    KlinePeriod.MINUTE_1,
-                    parseTradeTime(string(item, fieldIndex, "trade_time")),
+                    period,
+                    barTime,
                     decimal(item, fieldIndex, "open"),
                     decimal(item, fieldIndex, "high"),
                     decimal(item, fieldIndex, "low"),
                     decimal(item, fieldIndex, "close"),
                     decimal(item, fieldIndex, "vol"),
                     decimal(item, fieldIndex, "amount"),
-                    true,
+                    historical || isBarComplete(barTime, period),
                     "tushare"
             ));
         }
-        return bars;
+        return bars.stream()
+                .sorted((left, right) -> left.time().compareTo(right.time()))
+                .toList();
     }
 
     private Instant parseTradeTime(String value) {
         return LocalDateTime.parse(value, TRADE_TIME_FORMATTER)
                 .atZone(MARKET_ZONE)
                 .toInstant();
+    }
+
+    private boolean isBarComplete(Instant barTime, KlinePeriod period) {
+        return !barTime.plus(period.getDuration()).isAfter(clock.instant());
+    }
+
+    private String toRealtimeFreq(KlinePeriod period) {
+        return switch (period) {
+            case MINUTE_1 -> "1MIN";
+            case MINUTE_5 -> "5MIN";
+            case MINUTE_15 -> "15MIN";
+            case MINUTE_30 -> "30MIN";
+            case HOUR_1 -> "60MIN";
+            default -> throw new IllegalArgumentException("rt_min only supports intraday minute periods: " + period.getCode());
+        };
+    }
+
+    private String toHistoricalFreq(KlinePeriod period) {
+        return switch (period) {
+            case MINUTE_1 -> "1min";
+            case MINUTE_5 -> "5min";
+            case MINUTE_15 -> "15min";
+            case MINUTE_30 -> "30min";
+            case HOUR_1 -> "60min";
+            default -> throw new IllegalArgumentException("stk_mins only supports intraday minute periods: " + period.getCode());
+        };
     }
 
     private String string(List<Object> item, Map<String, Integer> fieldIndex, String field) {

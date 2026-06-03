@@ -17,6 +17,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.stereotype.Repository;
 
@@ -85,6 +86,32 @@ public class InfluxAdjFactorRepository implements AdjFactorRepository {
                 .toList();
     }
 
+    @Override
+    public Optional<LocalDate> findLatestTradeDate(String symbol) {
+        String flux = """
+                from(bucket: "%s")
+                  |> range(start: 1970-01-01T00:00:00Z)
+                  |> filter(fn: (r) => r._measurement == "adj_factor")
+                  |> filter(fn: (r) => r.symbol == "%s")
+                  |> filter(fn: (r) => r._field == "adj_factor")
+                  |> last()
+                  |> keep(columns: ["_time","symbol"])
+                """.formatted(properties.getBucket(), symbol);
+        FinanceHttpRequest request = new FinanceHttpRequest(
+                baseUri() + "/api/v2/query?org=" + encode(properties.getOrg()),
+                "POST",
+                "{\"query\":" + quoteJson(flux) + "}",
+                "application/json; charset=utf-8",
+                authorizationHeader(),
+                HttpPriority.NORMAL
+        );
+        var response = httpClient.executeAsync(request).join();
+        if (!response.isSuccessful()) {
+            throw new IllegalStateException("influx query failed: HTTP " + response.statusCode());
+        }
+        return parseLatestTradeDate(response.body());
+    }
+
     private String toLineProtocol(AdjFactorPoint factor) {
         Instant time = marketInstant(factor.tradeDate());
         long sourceUpdatedAt = System.currentTimeMillis();
@@ -131,6 +158,33 @@ public class InfluxAdjFactorRepository implements AdjFactorRepository {
             ));
         }
         return factors;
+    }
+
+    private Optional<LocalDate> parseLatestTradeDate(String csv) {
+        if (csv == null || csv.isBlank()) {
+            return Optional.empty();
+        }
+        String[] lines = csv.split("\\R");
+        List<String> headers = List.of();
+        for (String line : lines) {
+            if (line.isBlank() || line.startsWith("#")) {
+                continue;
+            }
+            List<String> columns = parseCsvLine(line);
+            if (columns.contains("_time")) {
+                headers = columns;
+                continue;
+            }
+            if (headers.isEmpty() || columns.size() < headers.size()) {
+                continue;
+            }
+            for (int i = 0; i < headers.size(); i++) {
+                if ("_time".equals(headers.get(i)) && !columns.get(i).isBlank()) {
+                    return Optional.of(Instant.parse(columns.get(i)).atZone(MARKET_ZONE).toLocalDate());
+                }
+            }
+        }
+        return Optional.empty();
     }
 
     private List<String> parseCsvLine(String line) {

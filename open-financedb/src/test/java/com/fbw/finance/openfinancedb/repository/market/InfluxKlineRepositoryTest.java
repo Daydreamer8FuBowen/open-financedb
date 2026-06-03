@@ -95,6 +95,42 @@ class InfluxKlineRepositoryTest {
         }
     }
 
+    @Test
+    void shouldCheckCompletenessAgainstExpectedTimes() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse()
+                    .setResponseCode(200)
+                    .setHeader("Content-Type", "text/csv")
+                    .setBody("""
+                            #datatype,string,long,dateTime:RFC3339,string,string,string,double,double,double,double,double,double,boolean
+                            #group,false,false,false,true,true,true,false,false,false,false,false,false,false
+                            #default,_result,,,,,,,,,,,,
+                            ,result,table,_time,symbol,period,source,open,high,low,close,volume,amount,complete
+                            ,,0,2024-01-10T01:31:00Z,000001.SZ,1m,tushare,10.1,10.5,10.0,10.3,123,456,true
+                            """));
+            server.start();
+
+            FinanceHttpExecutor executor = new FinanceHttpExecutor(1, 1, 10);
+            InfluxKlineRepository repository = repository(server, executor);
+            Instant first = Instant.parse("2024-01-10T01:31:00Z");
+            Instant second = Instant.parse("2024-01-10T01:32:00Z");
+
+            var completeness = repository.checkCompleteness(
+                    "000001.SZ",
+                    KlinePeriod.MINUTE_1,
+                    first,
+                    second.plusSeconds(60),
+                    List.of(first, second)
+            );
+
+            assertEquals(2, completeness.expectedCount());
+            assertEquals(1, completeness.actualCount());
+            assertTrue(!completeness.complete());
+
+            executor.close(Duration.ofSeconds(1));
+        }
+    }
+
     private static InfluxKlineRepository repository(MockWebServer server, FinanceHttpExecutor executor) {
         InfluxProperties properties = new InfluxProperties();
         properties.setUri(server.url("/").toString());

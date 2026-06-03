@@ -7,4 +7,8 @@ import java.util.List;
 public interface TradeMinuteWindowService {
 
     List<Instant> expectedMinuteInstants(String exchange, LocalDate startDate, LocalDate endDate);
+
+    default boolean isTradingTime(Instant instant) {
+        return false;
+    }
 }

@@ -24,7 +24,6 @@ public class StockSyncStateCreateReqVO {
 
     private LocalDateTime startTime;
     private LocalDateTime latestSyncTime;
-    private LocalDateTime targetSyncTime;
     private LocalDateTime lastSuccessTime;
     private LocalDateTime lastFailedTime;
 

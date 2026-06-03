@@ -11,7 +11,6 @@ public class StockSyncStateRespVO {
     private String dataType;
     private LocalDateTime startTime;
     private LocalDateTime latestSyncTime;
-    private LocalDateTime targetSyncTime;
     private LocalDateTime lastSuccessTime;
     private LocalDateTime lastFailedTime;
     private String syncStatus;

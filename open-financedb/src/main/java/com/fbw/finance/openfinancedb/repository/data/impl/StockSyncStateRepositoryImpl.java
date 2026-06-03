@@ -8,6 +8,7 @@ import com.fbw.finance.openfinancedb.model.entity.data.StockSyncStateEntity;
 import com.fbw.finance.openfinancedb.repository.data.StockSyncStateRepository;
 import com.fbw.finance.openfinancedb.repository.data.mapper.StockSyncStateMapper;
 import com.fbw.finance.openfinancedb.repository.support.RepositoryQueryHelper;
+import java.util.List;
 import java.util.Optional;
 import org.springframework.stereotype.Repository;
 
@@ -33,7 +34,7 @@ public class StockSyncStateRepositoryImpl implements StockSyncStateRepository {
                 .set(StockSyncStateEntity::getDataType, entity.getDataType())
                 .set(StockSyncStateEntity::getStartTime, entity.getStartTime())
                 .set(StockSyncStateEntity::getLatestSyncTime, entity.getLatestSyncTime())
-                .set(StockSyncStateEntity::getTargetSyncTime, entity.getTargetSyncTime())
+                .set(StockSyncStateEntity::getCursorTime, entity.getCursorTime())
                 .set(StockSyncStateEntity::getLastSuccessTime, entity.getLastSuccessTime())
                 .set(StockSyncStateEntity::getLastFailedTime, entity.getLastFailedTime())
                 .set(StockSyncStateEntity::getSyncStatus, entity.getSyncStatus())
@@ -66,6 +67,17 @@ public class StockSyncStateRepositoryImpl implements StockSyncStateRepository {
         LambdaQueryWrapper<StockSyncStateEntity> queryWrapper = buildQueryWrapper(reqVO)
                 .orderByDesc(StockSyncStateEntity::getId);
         return RepositoryQueryHelper.selectPage(stockSyncStateMapper, reqVO.getPageNo(), reqVO.getPageSize(), queryWrapper);
+    }
+
+    @Override
+    public List<StockSyncStateEntity> findBySymbolsAndDataType(List<String> symbols, String dataType) {
+        if (symbols == null || symbols.isEmpty()) {
+            return List.of();
+        }
+        LambdaQueryWrapper<StockSyncStateEntity> queryWrapper = new LambdaQueryWrapper<StockSyncStateEntity>()
+                .in(StockSyncStateEntity::getSymbol, symbols)
+                .eq(StockSyncStateEntity::getDataType, dataType);
+        return stockSyncStateMapper.selectList(queryWrapper);
     }
 
     private LambdaQueryWrapper<StockSyncStateEntity> buildQueryWrapper(StockSyncStatePageReqVO reqVO) {

@@ -12,10 +12,14 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Collectors;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Primary;
 import org.springframework.stereotype.Repository;
@@ -86,10 +90,71 @@ public class InfluxKlineRepository implements KlineRepository {
     }
 
     @Override
-    public KlineCompleteness checkCompleteness(String symbol, KlinePeriod period, Instant startTime, Instant endTime) {
-        long expected = expectedCount(period, startTime, endTime);
-        long actual = query(symbol, period, startTime, endTime).size();
-        return new KlineCompleteness(expected == actual, expected, actual);
+    public Optional<Instant> findLatestTime(String symbol, KlinePeriod period) {
+        String flux = """
+                from(bucket: "%s")
+                  |> range(start: 1970-01-01T00:00:00Z)
+                  |> filter(fn: (r) => r._measurement == "kline_bar")
+                  |> filter(fn: (r) => r.symbol == "%s" and r.period == "%s")
+                  |> last()
+                  |> keep(columns: ["_time"])
+                """.formatted(properties.getBucket(), symbol, period.getCode());
+        FinanceHttpRequest request = new FinanceHttpRequest(
+                baseUri() + "/api/v2/query?org=" + encode(properties.getOrg()),
+                "POST",
+                "{\"query\":" + quoteJson(flux) + "}",
+                "application/json; charset=utf-8",
+                authorizationHeader(),
+                HttpPriority.NORMAL
+        );
+        var response = httpClient.executeAsync(request).join();
+        if (!response.isSuccessful()) {
+            throw new IllegalStateException("influx latest time query failed: HTTP " + response.statusCode());
+        }
+        return parseLatestTime(response.body());
+    }
+
+    @Override
+    public Optional<Instant> findEarliestTime(String symbol, KlinePeriod period) {
+        String flux = """
+                from(bucket: "%s")
+                  |> range(start: 1970-01-01T00:00:00Z)
+                  |> filter(fn: (r) => r._measurement == "kline_bar")
+                  |> filter(fn: (r) => r.symbol == "%s" and r.period == "%s")
+                  |> first()
+                  |> keep(columns: ["_time"])
+                """.formatted(properties.getBucket(), symbol, period.getCode());
+        FinanceHttpRequest request = new FinanceHttpRequest(
+                baseUri() + "/api/v2/query?org=" + encode(properties.getOrg()),
+                "POST",
+                "{\"query\":" + quoteJson(flux) + "}",
+                "application/json; charset=utf-8",
+                authorizationHeader(),
+                HttpPriority.NORMAL
+        );
+        var response = httpClient.executeAsync(request).join();
+        if (!response.isSuccessful()) {
+            throw new IllegalStateException("influx earliest time query failed: HTTP " + response.statusCode());
+        }
+        return parseLatestTime(response.body());
+    }
+
+    @Override
+    public KlineCompleteness checkCompleteness(
+            String symbol,
+            KlinePeriod period,
+            Instant startTime,
+            Instant endTime,
+            Collection<Instant> expectedTimes) {
+        if (expectedTimes == null || expectedTimes.isEmpty()) {
+            return new KlineCompleteness(true, 0, 0);
+        }
+        Set<Instant> actualTimes = query(symbol, period, startTime, endTime).stream()
+                .map(KlineBar::time)
+                .collect(Collectors.toSet());
+        long actual = expectedTimes.stream().filter(actualTimes::contains).count();
+        long expected = expectedTimes.size();
+        return new KlineCompleteness(actual == expected, expected, actual);
     }
 
     private String toLineProtocol(KlineBar bar) {
@@ -153,6 +218,29 @@ public class InfluxKlineRepository implements KlineRepository {
         return bars;
     }
 
+    private Optional<Instant> parseLatestTime(String csv) {
+        if (csv == null || csv.isBlank()) {
+            return Optional.empty();
+        }
+        String[] lines = csv.split("\\R");
+        List<String> headers = List.of();
+        for (String line : lines) {
+            if (line.isBlank() || line.startsWith("#")) {
+                continue;
+            }
+            List<String> columns = parseCsvLine(line);
+            if (columns.contains("_time")) {
+                headers = columns;
+                continue;
+            }
+            int timeIndex = headers.indexOf("_time");
+            if (timeIndex >= 0 && columns.size() > timeIndex && !columns.get(timeIndex).isBlank()) {
+                return Optional.of(Instant.parse(columns.get(timeIndex)));
+            }
+        }
+        return Optional.empty();
+    }
+
     private List<String> parseCsvLine(String line) {
         List<String> values = new ArrayList<>();
         StringBuilder current = new StringBuilder();
@@ -177,15 +265,6 @@ public class InfluxKlineRepository implements KlineRepository {
             return BigDecimal.ZERO;
         }
         return new BigDecimal(value);
-    }
-
-    private long expectedCount(KlinePeriod period, Instant startTime, Instant endTime) {
-        if (!endTime.isAfter(startTime)) {
-            return 0;
-        }
-        long seconds = endTime.getEpochSecond() - startTime.getEpochSecond();
-        long periodSeconds = period.getDuration().toSeconds();
-        return (seconds + periodSeconds - 1) / periodSeconds;
     }
 
     private Map<String, String> authorizationHeader() {

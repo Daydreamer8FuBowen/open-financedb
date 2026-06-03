@@ -39,7 +39,8 @@ class InMemoryKlineRepositoryTest {
                 "000001.SZ",
                 KlinePeriod.MINUTE_1,
                 start,
-                start.plusSeconds(180)
+                start.plusSeconds(180),
+                List.of(start, start.plusSeconds(60), start.plusSeconds(120))
         );
 
         assertFalse(completeness.complete());

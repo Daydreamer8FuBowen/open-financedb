@@ -11,3 +11,7 @@ export function updateStockInfo(id, data) {
 export function batchUpdateSyncEnabled(data) {
   return http.put('/data/stock-infos/batch/is-realtime-sync', data)
 }
+
+export function batchUpdateSyncEnabledByQuery(data) {
+  return http.put('/data/stock-infos/batch/is-realtime-sync/by-query', data)
+}

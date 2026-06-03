@@ -2,6 +2,7 @@ package com.fbw.finance.openfinancedb.framework.startup;
 
 import com.fbw.finance.openfinancedb.service.bootstrap.StockInfoBootstrapService;
 import com.fbw.finance.openfinancedb.service.bootstrap.TradeCalendarBootstrapService;
+import com.fbw.finance.openfinancedb.service.market.KlineAggregationWorker;
 import com.fbw.finance.openfinancedb.service.market.HistoryKlineSyncWorker;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -18,20 +19,26 @@ public class MarketDataStartupRunner implements ApplicationRunner {
     private final StockInfoBootstrapService stockInfoBootstrapService;
     private final TradeCalendarBootstrapService tradeCalendarBootstrapService;
     private final HistoryKlineSyncWorker historyKlineSyncWorker;
+    private final KlineAggregationWorker klineAggregationWorker;
     private final boolean bootstrapEnabled;
     private final boolean historySyncEnabled;
+    private final boolean klineAggregationEnabled;
 
     public MarketDataStartupRunner(
             StockInfoBootstrapService stockInfoBootstrapService,
             TradeCalendarBootstrapService tradeCalendarBootstrapService,
             HistoryKlineSyncWorker historyKlineSyncWorker,
+            KlineAggregationWorker klineAggregationWorker,
             @Value("${finance.startup.bootstrap-enabled:true}") boolean bootstrapEnabled,
-            @Value("${finance.history-sync.enabled:true}") boolean historySyncEnabled) {
+            @Value("${finance.history-sync.enabled:true}") boolean historySyncEnabled,
+            @Value("${finance.kline-aggregation.enabled:true}") boolean klineAggregationEnabled) {
         this.stockInfoBootstrapService = stockInfoBootstrapService;
         this.tradeCalendarBootstrapService = tradeCalendarBootstrapService;
         this.historyKlineSyncWorker = historyKlineSyncWorker;
+        this.klineAggregationWorker = klineAggregationWorker;
         this.bootstrapEnabled = bootstrapEnabled;
         this.historySyncEnabled = historySyncEnabled;
+        this.klineAggregationEnabled = klineAggregationEnabled;
     }
 
     @Override
@@ -50,6 +57,13 @@ public class MarketDataStartupRunner implements ApplicationRunner {
             historyKlineSyncWorker.start();
         } else {
             log.info("市场数据启动流程：历史分钟线后台同步已关闭");
+        }
+
+        if (klineAggregationEnabled) {
+            log.info("市场数据启动流程：启动多周期 K 线后台聚合线程池");
+            klineAggregationWorker.start();
+        } else {
+            log.info("市场数据启动流程：多周期 K 线后台聚合已关闭");
         }
     }
 }

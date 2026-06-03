@@ -10,6 +10,7 @@ public enum SyncStatus implements DictEnum {
     RUNNING("RUNNING", "Running"),
     SUCCESS("SUCCESS", "Success"),
     FAILED("FAILED", "Failed"),
+    INCOMPLETE("INCOMPLETE", "Incomplete"),
     RETRYING("RETRYING", "Retrying"),
     PAUSED("PAUSED", "Paused");
 

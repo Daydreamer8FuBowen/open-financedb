@@ -1,6 +1,7 @@
 package com.fbw.finance.openfinancedb.service.data;
 
 import com.fbw.finance.openfinancedb.controller.data.vo.req.StockInfoCreateReqVO;
+import com.fbw.finance.openfinancedb.controller.data.vo.req.StockInfoBatchSyncByQueryReqVO;
 import com.fbw.finance.openfinancedb.controller.data.vo.req.StockInfoBatchSyncReqVO;
 import com.fbw.finance.openfinancedb.controller.data.vo.req.StockInfoPageReqVO;
 import com.fbw.finance.openfinancedb.controller.data.vo.req.StockInfoUpdateReqVO;
@@ -20,4 +21,6 @@ public interface StockInfoService {
     PageResult<StockInfoRespVO> page(StockInfoPageReqVO reqVO);
 
     int batchUpdateSyncEnabled(StockInfoBatchSyncReqVO reqVO);
+
+    int batchUpdateSyncEnabledByQuery(StockInfoBatchSyncByQueryReqVO reqVO);
 }

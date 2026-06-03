@@ -12,6 +12,7 @@ import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Optional;
 import okhttp3.OkHttpClient;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
@@ -83,6 +84,35 @@ class InfluxAdjFactorRepositoryTest {
             RecordedRequest request = server.takeRequest();
             assertTrue(request.getPath().startsWith("/api/v2/query?"));
             assertTrue(request.getBody().readUtf8().contains("adj_factor"));
+
+            executor.close(Duration.ofSeconds(1));
+        }
+    }
+
+    @Test
+    void shouldFindLatestAdjFactorTradeDateFromInfluxCsv() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(new MockResponse()
+                    .setResponseCode(200)
+                    .setHeader("Content-Type", "text/csv")
+                    .setBody("""
+                            #datatype,string,long,dateTime:RFC3339,string
+                            #group,false,false,false,true
+                            #default,_result,,,
+                            ,result,table,_time,symbol
+                            ,,0,2024-01-11T01:30:00Z,000001.SZ
+                            """));
+            server.start();
+
+            FinanceHttpExecutor executor = new FinanceHttpExecutor(1, 1, 10);
+            AdjFactorRepository repository = repository(server, executor);
+
+            Optional<LocalDate> latestTradeDate = repository.findLatestTradeDate("000001.SZ");
+
+            assertEquals(Optional.of(LocalDate.parse("2024-01-11")), latestTradeDate);
+            RecordedRequest request = server.takeRequest();
+            assertTrue(request.getPath().startsWith("/api/v2/query?"));
+            assertTrue(request.getBody().readUtf8().contains("|> last()"));
 
             executor.close(Duration.ofSeconds(1));
         }

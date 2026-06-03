@@ -33,9 +33,17 @@ public class KlineSyncServiceImpl implements KlineSyncService {
         klineRepository.upsert(bars);
 
         StockSyncStateEntity state = stockSyncStateRepository
-                .findBySymbolAndDataType(slice.symbol(), SyncDataType.MINUTE_1M.getCode())
+                .findBySymbolAndDataType(slice.symbol(), SyncDataType.KLINE_1M.getCode())
                 .orElseGet(() -> newState(slice));
-        state.setLatestSyncTime(LocalDateTime.ofInstant(slice.endTime(), MARKET_ZONE));
+        LocalDateTime latestBarTime = bars.stream()
+                .map(KlineBar::time)
+                .max(java.util.Comparator.naturalOrder())
+                .map(time -> LocalDateTime.ofInstant(time, MARKET_ZONE))
+                .orElse(LocalDateTime.ofInstant(slice.startTime(), MARKET_ZONE));
+        state.setLatestSyncTime(latestBarTime);
+        if (!bars.isEmpty()) {
+            state.setCursorTime(latestBarTime.plusMinutes(1));
+        }
         state.setLastSuccessTime(LocalDateTime.now(MARKET_ZONE));
         state.setSyncStatus(SyncStatus.SUCCESS.getCode());
 
@@ -51,7 +59,7 @@ public class KlineSyncServiceImpl implements KlineSyncService {
         // its cursor, so the slice writer creates the minimal state row idempotently.
         StockSyncStateEntity entity = new StockSyncStateEntity();
         entity.setSymbol(slice.symbol());
-        entity.setDataType(SyncDataType.MINUTE_1M.getCode());
+        entity.setDataType(SyncDataType.KLINE_1M.getCode());
         entity.setStartTime(LocalDateTime.ofInstant(slice.startTime(), MARKET_ZONE));
         entity.setSyncStatus(SyncStatus.PENDING.getCode());
         entity.setRetryCount(0);

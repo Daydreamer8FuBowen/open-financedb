@@ -1,6 +1,7 @@
 package com.fbw.finance.openfinancedb.controller.data;
 
 import com.fbw.finance.openfinancedb.controller.data.vo.req.StockInfoBatchSyncReqVO;
+import com.fbw.finance.openfinancedb.controller.data.vo.req.StockInfoBatchSyncByQueryReqVO;
 import com.fbw.finance.openfinancedb.controller.data.vo.req.StockInfoCreateReqVO;
 import com.fbw.finance.openfinancedb.controller.data.vo.req.StockInfoPageReqVO;
 import com.fbw.finance.openfinancedb.controller.data.vo.req.StockInfoUpdateReqVO;
@@ -63,6 +64,13 @@ public class StockInfoController {
     public CommonResult<Integer> batchUpdateSyncEnabled(
             @Valid @RequestBody StockInfoBatchSyncReqVO reqVO) {
         int updated = stockInfoService.batchUpdateSyncEnabled(reqVO);
+        return CommonResult.success(updated);
+    }
+
+    @PutMapping("/batch/is-realtime-sync/by-query")
+    public CommonResult<Integer> batchUpdateSyncEnabledByQuery(
+            @Valid @RequestBody StockInfoBatchSyncByQueryReqVO reqVO) {
+        int updated = stockInfoService.batchUpdateSyncEnabledByQuery(reqVO);
         return CommonResult.success(updated);
     }
 }

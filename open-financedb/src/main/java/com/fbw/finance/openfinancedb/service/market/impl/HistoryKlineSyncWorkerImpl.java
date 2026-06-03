@@ -2,9 +2,9 @@ package com.fbw.finance.openfinancedb.service.market.impl;
 
 import com.fbw.finance.openfinancedb.datasource.tushare.TushareKlineDataSource;
 import com.fbw.finance.openfinancedb.model.entity.data.StockInfoEntity;
-import com.fbw.finance.openfinancedb.model.entity.data.TradeCalendarEntity;
-import com.fbw.finance.openfinancedb.model.entity.data.SyncLogEntity;
 import com.fbw.finance.openfinancedb.model.entity.data.StockSyncStateEntity;
+import com.fbw.finance.openfinancedb.model.entity.data.SyncLogEntity;
+import com.fbw.finance.openfinancedb.model.entity.data.TradeCalendarEntity;
 import com.fbw.finance.openfinancedb.model.enums.SyncDataType;
 import com.fbw.finance.openfinancedb.model.enums.SyncStatus;
 import com.fbw.finance.openfinancedb.model.market.KlineBar;
@@ -18,6 +18,7 @@ import com.fbw.finance.openfinancedb.service.market.HistoryKlineSyncWorker;
 import com.fbw.finance.openfinancedb.service.market.TradeMinuteWindowService;
 import jakarta.annotation.PreDestroy;
 import java.time.Duration;
+import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -50,6 +51,7 @@ public class HistoryKlineSyncWorkerImpl implements HistoryKlineSyncWorker {
     private final KlineRepository klineRepository;
     private final TushareKlineDataSource tushareKlineDataSource;
     private final TradeMinuteWindowService tradeMinuteWindowService;
+    private final Clock clock;
     private final LocalDate defaultStartDate;
     private final Duration idleSleep;
     private final AtomicBoolean running = new AtomicBoolean(false);
@@ -70,6 +72,31 @@ public class HistoryKlineSyncWorkerImpl implements HistoryKlineSyncWorker {
             TradeMinuteWindowService tradeMinuteWindowService,
             @Value("${finance.history-sync.default-start-date:2015-01-01}") LocalDate defaultStartDate,
             @Value("${finance.history-sync.idle-sleep:30s}") Duration idleSleep) {
+        this(
+                stockInfoRepository,
+                stockSyncStateRepository,
+                syncLogRepository,
+                tradeCalendarRepository,
+                klineRepository,
+                tushareKlineDataSource,
+                tradeMinuteWindowService,
+                defaultStartDate,
+                idleSleep,
+                Clock.systemUTC()
+        );
+    }
+
+    public HistoryKlineSyncWorkerImpl(
+            StockInfoRepository stockInfoRepository,
+            StockSyncStateRepository stockSyncStateRepository,
+            SyncLogRepository syncLogRepository,
+            TradeCalendarRepository tradeCalendarRepository,
+            KlineRepository klineRepository,
+            TushareKlineDataSource tushareKlineDataSource,
+            TradeMinuteWindowService tradeMinuteWindowService,
+            LocalDate defaultStartDate,
+            Duration idleSleep,
+            Clock clock) {
         this.stockInfoRepository = stockInfoRepository;
         this.stockSyncStateRepository = stockSyncStateRepository;
         this.syncLogRepository = syncLogRepository;
@@ -77,6 +104,7 @@ public class HistoryKlineSyncWorkerImpl implements HistoryKlineSyncWorker {
         this.klineRepository = klineRepository;
         this.tushareKlineDataSource = tushareKlineDataSource;
         this.tradeMinuteWindowService = tradeMinuteWindowService;
+        this.clock = clock;
         this.defaultStartDate = defaultStartDate;
         this.idleSleep = idleSleep;
     }
@@ -121,8 +149,8 @@ public class HistoryKlineSyncWorkerImpl implements HistoryKlineSyncWorker {
     }
 
     private boolean runOneRound() {
-        LocalDate today = LocalDate.now(MARKET_ZONE);
-        Map<String, LocalDateTime> targetExclusiveByExchange = new HashMap<>();
+        LocalDate today = LocalDate.now(clock.withZone(MARKET_ZONE));
+        Map<String, LocalDateTime> targetTimeByExchange = new HashMap<>();
         boolean progressed = false;
         while (true) {
             var next = stockInfoRepository.findNextRealtimeSyncEnabledAfterId(scanAfterId);
@@ -136,52 +164,66 @@ public class HistoryKlineSyncWorkerImpl implements HistoryKlineSyncWorker {
             StockInfoEntity stock = next.get();
             scanAfterId = stock.getId() == null ? scanAfterId : stock.getId();
             String exchange = exchangeForCompleteness(stock);
-            LocalDateTime targetExclusive = targetExclusiveByExchange.computeIfAbsent(
+            LocalDateTime targetSyncTime = targetTimeByExchange.computeIfAbsent(
                     exchange,
-                    key -> resolveTargetExclusive(key, today)
+                    key -> resolveTargetSyncTime(key, today)
             );
-            if (syncNextMonthlySlice(stock, targetExclusive)) {
+            if (syncNextMonthlySlice(stock, targetSyncTime)) {
                 progressed = true;
             }
         }
     }
 
-    private LocalDateTime resolveTargetExclusive(String exchange, LocalDate today) {
+    private LocalDateTime resolveTargetSyncTime(String exchange, LocalDate today) {
         LocalDate endDate = today.minusDays(1);
         LocalDate startDate = endDate.minusDays(60);
         List<TradeCalendarEntity> openDays = tradeCalendarRepository.findOpenDays(exchange, startDate, endDate);
         if (openDays.isEmpty()) {
-            return today.atStartOfDay();
+            return null;
         }
         LocalDate lastOpenDay = openDays.get(openDays.size() - 1).getTradeDate();
-        return lastOpenDay.plusDays(1).atStartOfDay();
+        List<Instant> expectedMinutes = tradeMinuteWindowService.expectedMinuteInstants(exchange, lastOpenDay, lastOpenDay);
+        if (expectedMinutes.isEmpty()) {
+            return null;
+        }
+        return toLocalDateTime(expectedMinutes.getLast());
     }
 
-    private boolean syncNextMonthlySlice(StockInfoEntity stock, LocalDateTime targetExclusive) {
-        StockSyncStateEntity state = stockSyncStateRepository
-                .findBySymbolAndDataType(stock.getSymbol(), SyncDataType.MINUTE_1M.getCode())
-                .orElseGet(() -> newState(stock, targetExclusive));
-
-        LocalDateTime sliceStart = nextSliceStart(state, stock);
-        if (!sliceStart.isBefore(targetExclusive)) {
+    private boolean syncNextMonthlySlice(StockInfoEntity stock, LocalDateTime targetSyncTime) {
+        if (targetSyncTime == null) {
             return false;
         }
-        LocalDateTime sliceEnd = sliceStart.plusMonths(1);
-        if (sliceEnd.isAfter(targetExclusive)) {
-            sliceEnd = targetExclusive;
+        StockSyncStateEntity state = stockSyncStateRepository
+                .findBySymbolAndDataType(stock.getSymbol(), SyncDataType.KLINE_1M.getCode())
+                .orElseGet(() -> newState(stock));
+        if (SyncStatus.INCOMPLETE.getCode().equals(state.getSyncStatus())) {
+            log.warn("历史分钟线同步：symbol={} 已标记为数据不完整，跳过后续同步", stock.getSymbol());
+            return false;
+        }
+
+        LocalDateTime sliceStart = nextSliceStart(state, stock);
+        if (sliceStart.isAfter(targetSyncTime)) {
+            markCompleteIfCovered(state, targetSyncTime);
+            return repairTodayPrefixGapIfNeeded(stock, state);
+        }
+        LocalDateTime sliceEndExclusive = sliceStart.plusMonths(1);
+        LocalDateTime targetExclusive = targetSyncTime.plusMinutes(1);
+        if (sliceEndExclusive.isAfter(targetExclusive)) {
+            sliceEndExclusive = targetExclusive;
         }
 
         String exchange = exchangeForCompleteness(stock);
         long taskStartMillis = System.currentTimeMillis();
         long preCheckStartMillis = taskStartMillis;
-        List<Instant> expectedMinutes = tradeMinuteWindowService.expectedMinuteInstants(
-                exchange,
-                sliceStart.toLocalDate(),
-                sliceEnd.minusNanos(1).toLocalDate()
-        );
+        List<Instant> expectedMinutes = expectedMinutesForRange(exchange, sliceStart, sliceEndExclusive);
         long expectedLatencyMs = System.currentTimeMillis() - preCheckStartMillis;
-        log.info("历史分钟线同步：symbol={} 片段={} 至 {}，交易所={}，预期分钟数={}",
-                stock.getSymbol(), sliceStart, sliceEnd, exchange, expectedMinutes.size());
+        if (expectedMinutes.isEmpty()) {
+            return false;
+        }
+        LocalDateTime sliceLatestExpectedTime = toLocalDateTime(expectedMinutes.getLast());
+        boolean hasEarlierLocalData = hasEarlierLocalData(stock.getSymbol(), sliceStart);
+        log.info("历史分钟线同步：symbol={} 片段={} 至 {}，交易所={}，预期分钟数={}，目标时间={}",
+                stock.getSymbol(), sliceStart, sliceEndExclusive, exchange, expectedMinutes.size(), targetSyncTime);
 
         int fetchedCount = 0;
         int writtenCount = 0;
@@ -190,15 +232,24 @@ public class HistoryKlineSyncWorkerImpl implements HistoryKlineSyncWorker {
         Long validateLatencyMs = expectedLatencyMs;
         try {
             long existingCheckStartMillis = System.currentTimeMillis();
-            if (isSliceComplete(stock.getSymbol(), sliceStart, sliceEnd, expectedMinutes)) {
+            if (isSliceComplete(stock.getSymbol(), sliceStart, sliceEndExclusive, expectedMinutes)) {
                 long existingCheckLatencyMs = System.currentTimeMillis() - existingCheckStartMillis;
                 validateLatencyMs = expectedLatencyMs + existingCheckLatencyMs;
-                log.info("历史分钟线同步：symbol={} 片段数据已存在，跳过 Tushare 获取，直接推进状态", stock.getSymbol());
-                advanceStateOnly(state, stock, sliceStart, sliceEnd, targetExclusive);
+                LocalDateTime startTimeCandidate = !hasEarlierLocalData
+                        ? toLocalDateTime(expectedMinutes.getFirst())
+                        : state.getStartTime();
+                advanceStateOnSuccessfulSlice(
+                        state,
+                        stock,
+                        startTimeCandidate,
+                        sliceLatestExpectedTime,
+                        targetSyncTime,
+                        !hasEarlierLocalData
+                );
                 writeSyncLog(
                         stock.getSymbol(),
                         sliceStart,
-                        sliceEnd,
+                        sliceEndExclusive,
                         0,
                         0,
                         true,
@@ -209,36 +260,94 @@ public class HistoryKlineSyncWorkerImpl implements HistoryKlineSyncWorker {
                         0L,
                         validateLatencyMs
                 );
-                log.info(
-                        "历史分钟线同步耗时：symbol={} 片段={} 至 {} expected={}ms existingCheck={}ms total={}ms",
-                        stock.getSymbol(),
-                        sliceStart,
-                        sliceEnd,
-                        expectedLatencyMs,
-                        existingCheckLatencyMs,
-                        System.currentTimeMillis() - taskStartMillis
-                );
                 return true;
             }
 
             long fetchStartMillis = System.currentTimeMillis();
-            List<KlineBar> bars = tushareKlineDataSource.fetchMinuteBars(stock.getSymbol(), sliceStart, sliceEnd);
+            List<KlineBar> fetchedBars = filterFetchedBars(
+                    stock.getSymbol(),
+                    sliceStart,
+                    sliceEndExclusive,
+                    tushareKlineDataSource.fetchMinuteBars(stock.getSymbol(), sliceStart, sliceEndExclusive)
+            );
             fetchLatencyMs = System.currentTimeMillis() - fetchStartMillis;
-            fetchedCount = bars.size();
-            log.info("历史分钟线同步：symbol={} 从 Tushare 获取 {} 条分钟线，开始写入 InfluxDB", stock.getSymbol(), bars.size());
+            fetchedCount = fetchedBars.size();
+            log.info("历史分钟线同步：symbol={} 从 Tushare 获取 {} 条分钟线，开始写入 InfluxDB", stock.getSymbol(), fetchedBars.size());
+
+            if (fetchedBars.isEmpty()) {
+                if (hasEarlierLocalData) {
+                    throw new KlineIntegrityException(stock.getSymbol(), expectedMinutes.size(), 0, expectedMinutes.stream()
+                            .limit(5)
+                            .toList());
+                }
+                advanceStateForInitialGap(state, stock, sliceEndExclusive, targetSyncTime);
+                writeSyncLog(
+                        stock.getSymbol(),
+                        sliceStart,
+                        sliceEndExclusive,
+                        fetchedCount,
+                        0,
+                        true,
+                        null,
+                        "tushare empty historical slice, skipped as external missing data",
+                        taskStartMillis,
+                        fetchLatencyMs,
+                        0L,
+                        validateLatencyMs
+                );
+                return true;
+            }
+
+            PrefixFallback prefixFallback = resolvePrefixFallback(
+                    stock.getSymbol(),
+                    sliceStart,
+                    sliceEndExclusive,
+                    expectedMinutes,
+                    fetchedBars
+            );
+
             long writeStartMillis = System.currentTimeMillis();
-            klineRepository.upsert(bars);
+            klineRepository.upsert(fetchedBars);
             writeLatencyMs = System.currentTimeMillis() - writeStartMillis;
-            writtenCount = bars.size();
+            writtenCount = fetchedBars.size();
+
             long verifyStartMillis = System.currentTimeMillis();
-            assertSliceComplete(stock.getSymbol(), sliceStart, sliceEnd, expectedMinutes);
+            if (prefixFallback.hasMissingPrefix() && !hasEarlierLocalData) {
+                log.warn("历史分钟线同步：symbol={} 片段={} 至 {} Tushare 前置缺失 {} 个预期分钟，数据起点移动到 {}",
+                        stock.getSymbol(), sliceStart, sliceEndExclusive, prefixFallback.skippedCount(), prefixFallback.dataStart());
+                assertSliceComplete(stock.getSymbol(), sliceStart, sliceEndExclusive, prefixFallback.expectedForValidation());
+                LocalDateTime actualDataStart = prefixFallback.dataStart() != null
+                        ? prefixFallback.dataStart()
+                        : firstBarTime(fetchedBars);
+                advanceStateOnSuccessfulSlice(
+                        state,
+                        stock,
+                        actualDataStart,
+                        sliceLatestExpectedTime,
+                        targetSyncTime,
+                        true
+                );
+            } else {
+                assertSliceComplete(stock.getSymbol(), sliceStart, sliceEndExclusive, expectedMinutes);
+                LocalDateTime startTimeCandidate = !hasEarlierLocalData
+                        ? toLocalDateTime(expectedMinutes.getFirst())
+                        : state.getStartTime();
+                advanceStateOnSuccessfulSlice(
+                        state,
+                        stock,
+                        startTimeCandidate,
+                        sliceLatestExpectedTime,
+                        targetSyncTime,
+                        !hasEarlierLocalData
+                );
+            }
             long verifyLatencyMs = System.currentTimeMillis() - verifyStartMillis;
             validateLatencyMs = expectedLatencyMs + verifyLatencyMs;
-            advanceStateOnly(state, stock, sliceStart, sliceEnd, targetExclusive);
+
             writeSyncLog(
                     stock.getSymbol(),
                     sliceStart,
-                    sliceEnd,
+                    sliceEndExclusive,
                     fetchedCount,
                     writtenCount,
                     true,
@@ -250,40 +359,111 @@ public class HistoryKlineSyncWorkerImpl implements HistoryKlineSyncWorker {
                     validateLatencyMs
             );
             log.info(
-                    "历史分钟线同步：symbol={} 片段写入完成，状态推进至 {}，fetched={} expected={}",
+                    "历史分钟线同步：symbol={} 片段写入完成，状态推进至 latest={} target={}，fetched={} expected={}",
                     stock.getSymbol(),
-                    sliceEnd,
-                    bars.size(),
+                    sliceLatestExpectedTime,
+                    targetSyncTime,
+                    fetchedCount,
                     expectedMinutes.size()
-            );
-            log.info(
-                    "历史分钟线同步耗时：symbol={} 片段={} 至 {} expected={}ms fetch={}ms write={}ms verify={}ms total={}ms",
-                    stock.getSymbol(),
-                    sliceStart,
-                    sliceEnd,
-                    expectedLatencyMs,
-                    fetchLatencyMs,
-                    writeLatencyMs,
-                    verifyLatencyMs,
-                    System.currentTimeMillis() - taskStartMillis
             );
             return true;
         } catch (RuntimeException ex) {
-            // 可能QPS限制导致的异常，记录失败状态，稍后重试
-            markFailed(state, stock, sliceStart, targetExclusive, ex);
-            writeSyncLog(stock.getSymbol(), sliceStart, sliceEnd, fetchedCount, writtenCount, false,
-                    ex.getClass().getSimpleName(), ex.getMessage(), taskStartMillis, fetchLatencyMs, writeLatencyMs,
-                    validateLatencyMs);
+            if (ex instanceof KlineIntegrityException) {
+                markIncomplete(state, stock, sliceStart, ex);
+            } else {
+                markFailed(state, stock, sliceStart, ex);
+            }
+            writeSyncLog(
+                    stock.getSymbol(),
+                    sliceStart,
+                    sliceEndExclusive,
+                    fetchedCount,
+                    writtenCount,
+                    false,
+                    ex.getClass().getSimpleName(),
+                    ex.getMessage(),
+                    taskStartMillis,
+                    fetchLatencyMs,
+                    writeLatencyMs,
+                    validateLatencyMs
+            );
             log.error("历史分钟线同步：symbol={} 片段={} 至 {} 同步失败，原因={}",
-                    stock.getSymbol(), sliceStart, sliceEnd, ex.getMessage(), ex);
+                    stock.getSymbol(), sliceStart, sliceEndExclusive, ex.getMessage(), ex);
             return true;
         }
+    }
+
+    private boolean repairTodayPrefixGapIfNeeded(StockInfoEntity stock, StockSyncStateEntity state) {
+        if (!SyncStatus.SUCCESS.getCode().equals(state.getSyncStatus())) {
+            return false;
+        }
+        String exchange = exchangeForCompleteness(stock);
+        LocalDate today = LocalDate.now(clock.withZone(MARKET_ZONE));
+        if (tradeCalendarRepository.findByExchangeAndTradeDate(exchange, today)
+                .filter(TradeCalendarEntity::getIsOpen)
+                .isEmpty()) {
+            return false;
+        }
+        Instant now = clock.instant();
+        List<Instant> expectedToday = tradeMinuteWindowService.expectedMinuteInstants(exchange, today, today).stream()
+                .filter(time -> !time.isAfter(now))
+                .sorted()
+                .toList();
+        if (expectedToday.isEmpty()) {
+            return false;
+        }
+        Instant dayStart = today.atStartOfDay(MARKET_ZONE).toInstant();
+        Instant dayEnd = today.plusDays(1).atStartOfDay(MARKET_ZONE).toInstant();
+        List<KlineBar> localBars = klineRepository.query(stock.getSymbol(), KlinePeriod.MINUTE_1, dayStart, dayEnd);
+        Set<Instant> localTimes = localBars.stream()
+                .map(KlineBar::time)
+                .collect(java.util.stream.Collectors.toSet());
+        Instant validationEnd = localTimes.stream()
+                .filter(time -> !time.isAfter(now))
+                .max(java.util.Comparator.naturalOrder())
+                .orElse(expectedToday.getLast());
+        List<Instant> expectedPrefix = expectedToday.stream()
+                .filter(time -> !time.isAfter(validationEnd))
+                .toList();
+        List<Instant> missingPrefix = expectedPrefix.stream()
+                .filter(expected -> !localTimes.contains(expected))
+                .toList();
+        if (missingPrefix.isEmpty()) {
+            return false;
+        }
+        Set<Instant> missingSet = new HashSet<>(missingPrefix);
+        List<KlineBar> repairBars = tushareKlineDataSource.fetchRealtimeDailyMinuteBars(stock.getSymbol(), KlinePeriod.MINUTE_1).stream()
+                .filter(KlineBar::complete)
+                .filter(bar -> stock.getSymbol().equals(bar.symbol()))
+                .filter(bar -> bar.period() == KlinePeriod.MINUTE_1)
+                .filter(bar -> missingSet.contains(bar.time()))
+                .sorted(java.util.Comparator.comparing(KlineBar::time))
+                .toList();
+        if (repairBars.isEmpty()) {
+            return false;
+        }
+        klineRepository.upsert(repairBars);
+        log.info("历史分钟线同步：symbol={} 使用 rt_min_daily 补齐今日前缀缺口，missing={} written={}",
+                stock.getSymbol(), missingPrefix.size(), repairBars.size());
+        return true;
+    }
+
+    private List<Instant> expectedMinutesForRange(String exchange, LocalDateTime sliceStart, LocalDateTime sliceEndExclusive) {
+        Instant startInstant = sliceStart.atZone(MARKET_ZONE).toInstant();
+        Instant endInstant = sliceEndExclusive.atZone(MARKET_ZONE).toInstant();
+        return tradeMinuteWindowService.expectedMinuteInstants(
+                exchange,
+                sliceStart.toLocalDate(),
+                sliceEndExclusive.minusNanos(1).toLocalDate()
+        ).stream()
+                .filter(time -> !time.isBefore(startInstant) && time.isBefore(endInstant))
+                .toList();
     }
 
     private boolean isSliceComplete(
             String symbol,
             LocalDateTime sliceStart,
-            LocalDateTime sliceEnd,
+            LocalDateTime sliceEndExclusive,
             List<Instant> expectedMinutes) {
         if (expectedMinutes.isEmpty()) {
             return true;
@@ -292,7 +472,7 @@ public class HistoryKlineSyncWorkerImpl implements HistoryKlineSyncWorker {
                 symbol,
                 KlinePeriod.MINUTE_1,
                 sliceStart.atZone(MARKET_ZONE).toInstant(),
-                sliceEnd.atZone(MARKET_ZONE).toInstant()
+                sliceEndExclusive.atZone(MARKET_ZONE).toInstant()
         );
         Set<Instant> existingTimes = new HashSet<>();
         for (KlineBar bar : existing) {
@@ -303,10 +483,56 @@ public class HistoryKlineSyncWorkerImpl implements HistoryKlineSyncWorker {
         return complete;
     }
 
+    private PrefixFallback resolvePrefixFallback(
+            String symbol,
+            LocalDateTime sliceStart,
+            LocalDateTime sliceEndExclusive,
+            List<Instant> expectedMinutes,
+            List<KlineBar> bars) {
+        if (expectedMinutes.isEmpty()) {
+            return new PrefixFallback(false, false, null, 0, expectedMinutes);
+        }
+        if (bars == null || bars.isEmpty()) {
+            return new PrefixFallback(true, false, null, expectedMinutes.size(), List.of());
+        }
+        Instant sliceStartInstant = sliceStart.atZone(MARKET_ZONE).toInstant();
+        Instant sliceEndInstant = sliceEndExclusive.atZone(MARKET_ZONE).toInstant();
+        Set<Instant> fetchedTimes = new HashSet<>();
+        for (KlineBar bar : bars) {
+            if (symbol.equals(bar.symbol())
+                    && bar.period() == KlinePeriod.MINUTE_1
+                    && !bar.time().isBefore(sliceStartInstant)
+                    && bar.time().isBefore(sliceEndInstant)) {
+                fetchedTimes.add(bar.time());
+            }
+        }
+        int firstPresentIndex = -1;
+        for (int index = 0; index < expectedMinutes.size(); index++) {
+            if (fetchedTimes.contains(expectedMinutes.get(index))) {
+                firstPresentIndex = index;
+                break;
+            }
+        }
+        if (firstPresentIndex <= 0) {
+            return new PrefixFallback(false, false, null, 0, expectedMinutes);
+        }
+        List<Instant> suffix = expectedMinutes.subList(firstPresentIndex, expectedMinutes.size());
+        if (!fetchedTimes.containsAll(suffix)) {
+            return new PrefixFallback(false, false, null, 0, expectedMinutes);
+        }
+        return new PrefixFallback(
+                false,
+                true,
+                toLocalDateTime(expectedMinutes.get(firstPresentIndex)),
+                firstPresentIndex,
+                List.copyOf(suffix)
+        );
+    }
+
     private void assertSliceComplete(
             String symbol,
             LocalDateTime sliceStart,
-            LocalDateTime sliceEnd,
+            LocalDateTime sliceEndExclusive,
             List<Instant> expectedMinutes) {
         if (expectedMinutes.isEmpty()) {
             return;
@@ -315,7 +541,7 @@ public class HistoryKlineSyncWorkerImpl implements HistoryKlineSyncWorker {
                 symbol,
                 KlinePeriod.MINUTE_1,
                 sliceStart.atZone(MARKET_ZONE).toInstant(),
-                sliceEnd.atZone(MARKET_ZONE).toInstant()
+                sliceEndExclusive.atZone(MARKET_ZONE).toInstant()
         );
         Set<Instant> persistedTimes = new HashSet<>();
         for (KlineBar bar : persisted) {
@@ -333,10 +559,42 @@ public class HistoryKlineSyncWorkerImpl implements HistoryKlineSyncWorker {
         throw new KlineIntegrityException(symbol, expectedMinutes.size(), persistedTimes.size(), missing);
     }
 
+    private List<KlineBar> filterFetchedBars(
+            String symbol,
+            LocalDateTime sliceStart,
+            LocalDateTime sliceEndExclusive,
+            List<KlineBar> bars) {
+        if (bars == null || bars.isEmpty()) {
+            return List.of();
+        }
+        Instant startInstant = sliceStart.atZone(MARKET_ZONE).toInstant();
+        Instant endInstant = sliceEndExclusive.atZone(MARKET_ZONE).toInstant();
+        return bars.stream()
+                .filter(bar -> symbol.equals(bar.symbol()))
+                .filter(bar -> bar.period() == KlinePeriod.MINUTE_1)
+                .filter(bar -> !bar.time().isBefore(startInstant) && bar.time().isBefore(endInstant))
+                .sorted(java.util.Comparator.comparing(KlineBar::time))
+                .toList();
+    }
+
+    private boolean hasEarlierLocalData(String symbol, LocalDateTime sliceStart) {
+        Instant sliceStartInstant = sliceStart.atZone(MARKET_ZONE).toInstant();
+        return klineRepository.findEarliestTime(symbol, KlinePeriod.MINUTE_1)
+                .filter(earliest -> earliest.isBefore(sliceStartInstant))
+                .isPresent();
+    }
+
     private LocalDateTime nextSliceStart(StockSyncStateEntity state, StockInfoEntity stock) {
-        LocalDateTime cursor = state.getLatestSyncTime() != null
-                ? state.getLatestSyncTime()
-                : state.getStartTime() != null ? state.getStartTime() : defaultStartDate.atStartOfDay();
+        LocalDateTime cursor = state.getCursorTime();
+        if (cursor == null && state.getLatestSyncTime() != null) {
+            cursor = state.getLatestSyncTime().plusMinutes(1);
+        }
+        if (cursor == null) {
+            cursor = state.getStartTime();
+        }
+        if (cursor == null) {
+            cursor = resolveInitialStartTime(stock);
+        }
         LocalDate listDate = stock == null ? null : stock.getListDate();
         if (listDate != null && cursor.toLocalDate().isBefore(listDate)) {
             return listDate.atStartOfDay();
@@ -344,57 +602,110 @@ public class HistoryKlineSyncWorkerImpl implements HistoryKlineSyncWorker {
         return cursor;
     }
 
-    private void advanceStateOnly(
+    private void advanceStateOnSuccessfulSlice(
             StockSyncStateEntity state,
             StockInfoEntity stock,
-            LocalDateTime sliceStart,
-            LocalDateTime sliceEnd,
-            LocalDateTime targetExclusive) {
-        if (state.getId() == null) {
-            state.setSymbol(stock.getSymbol());
-            state.setDataType(SyncDataType.MINUTE_1M.getCode());
-            state.setStartTime(sliceStart);
-            state.setRetryCount(0);
-            state.setDataSource("influxdb");
+            LocalDateTime startTimeCandidate,
+            LocalDateTime latestSyncTime,
+            LocalDateTime targetSyncTime,
+            boolean updateStartTime) {
+        initializeState(state, stock);
+        if (updateStartTime && startTimeCandidate != null) {
+            state.setStartTime(startTimeCandidate);
+        } else if (state.getStartTime() == null && startTimeCandidate != null) {
+            state.setStartTime(startTimeCandidate);
         }
-        state.setLatestSyncTime(sliceEnd);
-        state.setTargetSyncTime(targetExclusive);
+        state.setLatestSyncTime(latestSyncTime);
+        state.setCursorTime(latestSyncTime.plusMinutes(1));
         state.setLastSuccessTime(LocalDateTime.now(MARKET_ZONE));
-        state.setSyncStatus(SyncStatus.SUCCESS.getCode());
+        state.setSyncStatus(latestSyncTime.isBefore(targetSyncTime)
+                ? SyncStatus.PENDING.getCode()
+                : SyncStatus.SUCCESS.getCode());
         state.setLastError(null);
-        if (state.getId() == null) {
-            stockSyncStateRepository.create(state);
-        } else {
-            stockSyncStateRepository.update(state);
-        }
+        persistState(state);
     }
 
-    private void updateTargetTime(String symbol, LocalDateTime targetExclusive) {
-        stockSyncStateRepository.findBySymbolAndDataType(symbol, SyncDataType.MINUTE_1M.getCode())
-                .ifPresent(state -> {
-                    state.setTargetSyncTime(targetExclusive);
-                    stockSyncStateRepository.update(state);
-                });
+    private void markCompleteIfCovered(StockSyncStateEntity state, LocalDateTime targetSyncTime) {
+        LocalDateTime cursorTime = state.getCursorTime();
+        if (cursorTime == null || !cursorTime.isAfter(targetSyncTime)) {
+            return;
+        }
+        state.setSyncStatus(SyncStatus.SUCCESS.getCode());
+        state.setLastSuccessTime(LocalDateTime.now(MARKET_ZONE));
+        state.setLastError(null);
+        persistState(state);
+    }
+
+    private void advanceStateForInitialGap(
+            StockSyncStateEntity state,
+            StockInfoEntity stock,
+            LocalDateTime nextProbeStart,
+            LocalDateTime targetSyncTime) {
+        initializeState(state, stock);
+        state.setStartTime(nextProbeStart);
+        state.setCursorTime(nextProbeStart);
+        state.setLastSuccessTime(LocalDateTime.now(MARKET_ZONE));
+        state.setSyncStatus(nextProbeStart.isAfter(targetSyncTime)
+                ? SyncStatus.SUCCESS.getCode()
+                : SyncStatus.PENDING.getCode());
+        state.setLastError(null);
+        persistState(state);
     }
 
     private void markFailed(
             StockSyncStateEntity state,
             StockInfoEntity stock,
             LocalDateTime sliceStart,
-            LocalDateTime targetExclusive,
             RuntimeException ex) {
-        if (state.getId() == null) {
-            state.setSymbol(stock.getSymbol());
-            state.setDataType(SyncDataType.MINUTE_1M.getCode());
+        initializeState(state, stock);
+        if (state.getStartTime() == null) {
             state.setStartTime(sliceStart);
-            state.setRetryCount(0);
-            state.setDataSource("tushare");
         }
-        state.setTargetSyncTime(targetExclusive);
+        if (state.getCursorTime() == null) {
+            state.setCursorTime(sliceStart);
+        }
         state.setLastFailedTime(LocalDateTime.now(MARKET_ZONE));
         state.setRetryCount(state.getRetryCount() == null ? 1 : state.getRetryCount() + 1);
         state.setSyncStatus(SyncStatus.FAILED.getCode());
         state.setLastError(ex.getMessage());
+        persistState(state);
+    }
+
+    private void markIncomplete(
+            StockSyncStateEntity state,
+            StockInfoEntity stock,
+            LocalDateTime sliceStart,
+            RuntimeException ex) {
+        initializeState(state, stock);
+        if (state.getStartTime() == null) {
+            state.setStartTime(sliceStart);
+        }
+        if (state.getCursorTime() == null) {
+            state.setCursorTime(sliceStart);
+        }
+        state.setLastFailedTime(LocalDateTime.now(MARKET_ZONE));
+        state.setRetryCount(state.getRetryCount() == null ? 1 : state.getRetryCount() + 1);
+        state.setSyncStatus(SyncStatus.INCOMPLETE.getCode());
+        state.setLastError(ex.getMessage());
+        persistState(state);
+    }
+
+    private void initializeState(StockSyncStateEntity state, StockInfoEntity stock) {
+        if (state.getId() == null) {
+            state.setSymbol(stock.getSymbol());
+            state.setDataType(SyncDataType.KLINE_1M.getCode());
+            state.setRetryCount(0);
+            state.setDataSource("tushare");
+            if (state.getStartTime() == null) {
+                state.setStartTime(resolveInitialStartTime(stock));
+            }
+            if (state.getCursorTime() == null) {
+                state.setCursorTime(state.getStartTime());
+            }
+        }
+    }
+
+    private void persistState(StockSyncStateEntity state) {
         if (state.getId() == null) {
             stockSyncStateRepository.create(state);
         } else {
@@ -405,7 +716,7 @@ public class HistoryKlineSyncWorkerImpl implements HistoryKlineSyncWorker {
     private void writeSyncLog(
             String symbol,
             LocalDateTime sliceStart,
-            LocalDateTime sliceEnd,
+            LocalDateTime sliceEndExclusive,
             int fetchedCount,
             int writtenCount,
             boolean success,
@@ -419,10 +730,10 @@ public class HistoryKlineSyncWorkerImpl implements HistoryKlineSyncWorker {
         entity.setLogId("hist-" + UUID.randomUUID());
         entity.setTaskId(symbol + "-" + sliceStart.toLocalDate());
         entity.setSymbol(symbol);
-        entity.setDataType(SyncDataType.MINUTE_1M.getCode());
+        entity.setDataType(SyncDataType.KLINE_1M.getCode());
         entity.setDataSource("tushare");
         entity.setStartTime(sliceStart);
-        entity.setEndTime(sliceEnd);
+        entity.setEndTime(sliceEndExclusive);
         entity.setFetchLatencyMs(fetchLatencyMs);
         entity.setCleanLatencyMs(validateLatencyMs);
         entity.setWriteLatencyMs(writeLatencyMs);
@@ -443,12 +754,12 @@ public class HistoryKlineSyncWorkerImpl implements HistoryKlineSyncWorker {
         return value.substring(0, maxLength);
     }
 
-    private StockSyncStateEntity newState(StockInfoEntity stock, LocalDateTime targetExclusive) {
+    private StockSyncStateEntity newState(StockInfoEntity stock) {
         StockSyncStateEntity state = new StockSyncStateEntity();
         state.setSymbol(stock.getSymbol());
-        state.setDataType(SyncDataType.MINUTE_1M.getCode());
+        state.setDataType(SyncDataType.KLINE_1M.getCode());
         state.setStartTime(resolveInitialStartTime(stock));
-        state.setTargetSyncTime(targetExclusive);
+        state.setCursorTime(state.getStartTime());
         state.setRetryCount(0);
         state.setSyncStatus(SyncStatus.PENDING.getCode());
         state.setDataSource("tushare");
@@ -461,6 +772,18 @@ public class HistoryKlineSyncWorkerImpl implements HistoryKlineSyncWorker {
             startDate = stock.getListDate();
         }
         return startDate.atStartOfDay();
+    }
+
+    private LocalDateTime firstBarTime(List<KlineBar> bars) {
+        return bars.stream()
+                .map(KlineBar::time)
+                .min(java.util.Comparator.naturalOrder())
+                .map(this::toLocalDateTime)
+                .orElse(null);
+    }
+
+    private LocalDateTime toLocalDateTime(Instant instant) {
+        return LocalDateTime.ofInstant(instant, MARKET_ZONE);
     }
 
     private String exchangeForCompleteness(StockInfoEntity stock) {
@@ -490,5 +813,13 @@ public class HistoryKlineSyncWorkerImpl implements HistoryKlineSyncWorker {
                     + ", actualCount=" + actualCount
                     + ", missingSamples=" + missingSamples);
         }
+    }
+
+    private record PrefixFallback(
+            boolean emptySlice,
+            boolean hasMissingPrefix,
+            LocalDateTime dataStart,
+            int skippedCount,
+            List<Instant> expectedForValidation) {
     }
 }

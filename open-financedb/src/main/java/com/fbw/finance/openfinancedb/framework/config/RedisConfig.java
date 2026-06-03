@@ -11,14 +11,14 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Lazy;
 
 @Configuration
-@EnableConfigurationProperties(FinanceRedisProperties.class)
+@EnableConfigurationProperties(SpringRedisProperties.class)
 public class RedisConfig {
 
     @Bean(destroyMethod = "shutdown")
     @Lazy
     @ConditionalOnMissingBean
-    @ConditionalOnProperty(prefix = "finance.redis", name = "enabled", havingValue = "true")
-    public RedissonClient redissonClient(FinanceRedisProperties properties) {
+    @ConditionalOnProperty(prefix = "spring.data.redis", name = "host")
+    public RedissonClient redissonClient(SpringRedisProperties properties) {
         Config config = new Config();
         config.setPassword(normalizePassword(properties.getPassword()));
         config.useSingleServer()

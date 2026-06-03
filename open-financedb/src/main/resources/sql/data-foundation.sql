@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS stock_sync_state (
     data_type VARCHAR(64) NOT NULL COMMENT 'Sync data type',
     start_time DATETIME DEFAULT NULL COMMENT 'Current start time',
     latest_sync_time DATETIME DEFAULT NULL COMMENT 'Latest synced time',
-    target_sync_time DATETIME DEFAULT NULL COMMENT 'Target synced time',
+    cursor_time DATETIME DEFAULT NULL COMMENT 'Next required processing cursor time',
     last_success_time DATETIME DEFAULT NULL COMMENT 'Last success time',
     last_failed_time DATETIME DEFAULT NULL COMMENT 'Last failed time',
     sync_status VARCHAR(32) NOT NULL DEFAULT 'PENDING' COMMENT 'Sync status',
@@ -91,7 +91,8 @@ CREATE TABLE IF NOT EXISTS stock_sync_state (
     UNIQUE KEY uk_symbol_data_type (symbol, data_type),
     KEY idx_data_type (data_type),
     KEY idx_sync_status (sync_status),
-    KEY idx_latest_sync_time (latest_sync_time)
+    KEY idx_latest_sync_time (latest_sync_time),
+    KEY idx_cursor_time (cursor_time)
 ) COMMENT='Stock sync state';
 
 CREATE TABLE IF NOT EXISTS sync_log (

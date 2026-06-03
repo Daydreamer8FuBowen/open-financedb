@@ -16,28 +16,25 @@ class RedisConfigTest {
             .withUserConfiguration(RedisConfig.class);
 
     @Test
-    void createsRedisAndRedissonInfrastructureWhenEnabled() {
+    void createsRedisAndRedissonInfrastructureWhenSpringRedisIsConfigured() {
         contextRunner
                 .withPropertyValues(
-                        "finance.redis.enabled=true",
-                        "finance.redis.host=localhost",
-                        "finance.redis.port=3306",
-                        "finance.redis.password=",
-                        "finance.redis.database=0",
-                        "finance.redis.timeout=3s")
+                        "spring.data.redis.host=localhost",
+                        "spring.data.redis.port=6379",
+                        "spring.data.redis.password=",
+                        "spring.data.redis.database=0",
+                        "spring.data.redis.timeout=3s")
                 .run(context -> {
-                    assertThat(context).hasSingleBean(FinanceRedisProperties.class);
+                    assertThat(context).hasSingleBean(SpringRedisProperties.class);
                     assertThat(context).hasBean("redisTemplate");
                     assertThat(context.getBean("redisTemplate")).isInstanceOf(RedisTemplate.class);
                     assertThat(context).hasSingleBean(RedissonClient.class);
-                    assertThat(context.getBean(FinanceRedisProperties.class).getPort()).isEqualTo(3306);
                 });
     }
 
     @Test
-    void skipsRedissonClientWhenRedisIsDisabled() {
+    void skipsRedissonClientWhenSpringRedisHostIsMissing() {
         contextRunner
-                .withPropertyValues("finance.redis.enabled=false")
                 .run(context -> assertThat(context).doesNotHaveBean(RedissonClient.class));
     }
 }

@@ -5,10 +5,14 @@ import com.fbw.finance.openfinancedb.model.market.KlineCompleteness;
 import com.fbw.finance.openfinancedb.model.market.KlinePeriod;
 import com.fbw.finance.openfinancedb.repository.market.KlineRepository;
 import java.time.Instant;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
 public class InMemoryKlineRepository implements KlineRepository {
 
@@ -35,19 +39,39 @@ public class InMemoryKlineRepository implements KlineRepository {
     }
 
     @Override
-    public KlineCompleteness checkCompleteness(String symbol, KlinePeriod period, Instant startTime, Instant endTime) {
-        long expected = expectedCount(period, startTime, endTime);
-        long actual = query(symbol, period, startTime, endTime).size();
-        return new KlineCompleteness(expected == actual, expected, actual);
+    public Optional<Instant> findLatestTime(String symbol, KlinePeriod period) {
+        return bars.values().stream()
+                .filter(bar -> symbol.equals(bar.symbol()))
+                .filter(bar -> period == bar.period())
+                .map(KlineBar::time)
+                .max(Comparator.naturalOrder());
     }
 
-    private long expectedCount(KlinePeriod period, Instant startTime, Instant endTime) {
-        if (!endTime.isAfter(startTime)) {
-            return 0;
+    @Override
+    public Optional<Instant> findEarliestTime(String symbol, KlinePeriod period) {
+        return bars.values().stream()
+                .filter(bar -> symbol.equals(bar.symbol()))
+                .filter(bar -> period == bar.period())
+                .map(KlineBar::time)
+                .min(Comparator.naturalOrder());
+    }
+
+    @Override
+    public KlineCompleteness checkCompleteness(
+            String symbol,
+            KlinePeriod period,
+            Instant startTime,
+            Instant endTime,
+            Collection<Instant> expectedTimes) {
+        if (expectedTimes == null || expectedTimes.isEmpty()) {
+            return new KlineCompleteness(true, 0, 0);
         }
-        long seconds = endTime.getEpochSecond() - startTime.getEpochSecond();
-        long periodSeconds = period.getDuration().toSeconds();
-        return (seconds + periodSeconds - 1) / periodSeconds;
+        Set<Instant> actualTimes = query(symbol, period, startTime, endTime).stream()
+                .map(KlineBar::time)
+                .collect(Collectors.toSet());
+        long actual = expectedTimes.stream().filter(actualTimes::contains).count();
+        long expected = expectedTimes.size();
+        return new KlineCompleteness(actual == expected, expected, actual);
     }
 
     private record Key(String symbol, KlinePeriod period, Instant time) {

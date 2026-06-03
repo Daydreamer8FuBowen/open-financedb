@@ -7,7 +7,7 @@ import lombok.RequiredArgsConstructor;
 @RequiredArgsConstructor
 public enum SyncDataType implements DictEnum {
     DAILY_KLINE("daily_kline", "Daily Kline"),
-    MINUTE_1M("minute_1m", "Minute 1m"),
+    KLINE_1M("kline_1m", "Kline 1m"),
     ADJ_FACTOR("adj_factor", "Adjustment Factor"),
     KLINE_5M("kline_5m", "Kline 5m"),
     KLINE_15M("kline_15m", "Kline 15m"),
@@ -22,3 +22,4 @@ public enum SyncDataType implements DictEnum {
     private final String code;
     private final String label;
 }
+
