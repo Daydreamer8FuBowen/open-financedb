@@ -12,6 +12,7 @@ import com.fbw.finance.openfinancedb.controller.data.vo.req.TradeCalendarPageReq
 import com.fbw.finance.openfinancedb.datasource.tushare.TushareKlineDataSource;
 import com.fbw.finance.openfinancedb.framework.web.PageResult;
 import com.fbw.finance.openfinancedb.model.entity.data.StockInfoEntity;
+import com.fbw.finance.openfinancedb.model.entity.data.StockKlineMissingRecordEntity;
 import com.fbw.finance.openfinancedb.model.entity.data.StockSyncStateEntity;
 import com.fbw.finance.openfinancedb.model.entity.data.SyncLogEntity;
 import com.fbw.finance.openfinancedb.model.entity.data.TradeCalendarEntity;
@@ -20,6 +21,7 @@ import com.fbw.finance.openfinancedb.model.market.KlineBar;
 import com.fbw.finance.openfinancedb.model.market.KlineCompleteness;
 import com.fbw.finance.openfinancedb.model.market.KlinePeriod;
 import com.fbw.finance.openfinancedb.repository.data.StockInfoRepository;
+import com.fbw.finance.openfinancedb.repository.data.StockKlineMissingRecordRepository;
 import com.fbw.finance.openfinancedb.repository.data.StockSyncStateRepository;
 import com.fbw.finance.openfinancedb.repository.data.SyncLogRepository;
 import com.fbw.finance.openfinancedb.repository.data.TradeCalendarRepository;
@@ -169,10 +171,12 @@ class HistoryKlineSyncWorkerTest {
                 bar("000001.SZ", EXPECTED_MINUTE_3)
         );
         FakeSyncLogRepository syncLogRepository = new FakeSyncLogRepository();
+        FakeStockKlineMissingRecordRepository missingRecordRepository = new FakeStockKlineMissingRecordRepository();
 
         invokeRunOneRound(new HistoryKlineSyncWorkerImpl(
                 stockInfoRepository,
                 stateRepository,
+                missingRecordRepository,
                 syncLogRepository,
                 new FakeTradeCalendarRepository(),
                 klineRepository,
@@ -182,15 +186,24 @@ class HistoryKlineSyncWorkerTest {
                 Duration.ofMillis(1)
         ));
 
-        assertNull(stateRepository.state("000001.SZ").getLatestSyncTime());
-        assertEquals(SyncStatus.INCOMPLETE.getCode(), stateRepository.state("000001.SZ").getSyncStatus());
+        assertEquals(LocalDateTime.ofInstant(EXPECTED_MINUTE_3, MARKET_ZONE), stateRepository.state("000001.SZ").getLatestSyncTime());
+        assertEquals(SyncStatus.SUCCESS.getCode(), stateRepository.state("000001.SZ").getSyncStatus());
+        assertEquals(List.of(LocalDate.of(2024, 1, 2)), missingRecordRepository.records.stream()
+                .map(StockKlineMissingRecordEntity::getMissingDate)
+                .toList());
+        assertEquals(List.of(), klineRepository.query(
+                "000001.SZ",
+                KlinePeriod.MINUTE_1,
+                EXPECTED_MINUTE.minusSeconds(60),
+                EXPECTED_MINUTE_3.plusSeconds(60)
+        ));
         assertEquals(1, syncLogRepository.logs.size());
-        assertEquals(false, syncLogRepository.logs.getFirst().getSuccess());
-        assertEquals("KlineIntegrityException", syncLogRepository.logs.getFirst().getErrorType());
+        assertEquals(true, syncLogRepository.logs.getFirst().getSuccess());
+        assertNull(syncLogRepository.logs.getFirst().getErrorType());
     }
 
     @Test
-    void shouldSkipSymbolWhenStateAlreadyMarkedIncomplete() throws Exception {
+    void shouldContinueSymbolWhenStateWasPreviouslyMarkedIncomplete() throws Exception {
         FakeStockInfoRepository stockInfoRepository = new FakeStockInfoRepository(List.of(stock(1L, "000001.SZ")));
         FakeStockSyncStateRepository stateRepository = new FakeStockSyncStateRepository();
         StockSyncStateEntity state = new StockSyncStateEntity();
@@ -205,9 +218,9 @@ class HistoryKlineSyncWorkerTest {
 
         boolean progressed = invokeRunOneRound(newWorker(stockInfoRepository, stateRepository, klineRepository, tushare));
 
-        assertFalse(progressed);
-        assertTrue(tushare.fetchSymbols.isEmpty());
-        assertEquals(SyncStatus.INCOMPLETE.getCode(), stateRepository.state("000001.SZ").getSyncStatus());
+        assertTrue(progressed);
+        assertEquals(List.of("000001.SZ"), tushare.fetchSymbols);
+        assertEquals(SyncStatus.SUCCESS.getCode(), stateRepository.state("000001.SZ").getSyncStatus());
     }
 
     @Test
@@ -225,12 +238,12 @@ class HistoryKlineSyncWorkerTest {
         assertTrue(progressed);
         assertEquals(LocalDateTime.ofInstant(EXPECTED_MINUTE_2, MARKET_ZONE), state.getStartTime());
         assertEquals(LocalDateTime.ofInstant(EXPECTED_MINUTE_2, MARKET_ZONE), state.getCursorTime());
-        assertNull(state.getLatestSyncTime());
+        assertEquals(LocalDateTime.ofInstant(EXPECTED_MINUTE, MARKET_ZONE), state.getLatestSyncTime());
         assertEquals(true, syncLogRepository.logs.getFirst().getSuccess());
     }
 
     @Test
-    void shouldSkipOnlyMissingPrefixWhenLaterTushareSliceIsComplete() throws Exception {
+    void shouldDropWholeDayWhenPrefixMinuteIsMissingEvenIfLaterTushareBarsExist() throws Exception {
         FakeStockInfoRepository stockInfoRepository = new FakeStockInfoRepository(List.of(stock(1L, "000001.SZ")));
         FakeStockSyncStateRepository stateRepository = new FakeStockSyncStateRepository();
         FakeKlineRepository klineRepository = new FakeKlineRepository();
@@ -257,9 +270,15 @@ class HistoryKlineSyncWorkerTest {
 
         StockSyncStateEntity state = stateRepository.state("000001.SZ");
         assertTrue(progressed);
-        assertEquals(LocalDateTime.ofInstant(EXPECTED_MINUTE_2, MARKET_ZONE), state.getStartTime());
+        assertEquals(LocalDateTime.ofInstant(EXPECTED_MINUTE_3.plusSeconds(60), MARKET_ZONE), state.getStartTime());
         assertEquals(LocalDateTime.ofInstant(EXPECTED_MINUTE_3, MARKET_ZONE), state.getLatestSyncTime());
         assertEquals(LocalDateTime.ofInstant(EXPECTED_MINUTE_3.plusSeconds(60), MARKET_ZONE), state.getCursorTime());
+        assertEquals(List.of(), klineRepository.query(
+                "000001.SZ",
+                KlinePeriod.MINUTE_1,
+                EXPECTED_MINUTE.minusSeconds(60),
+                EXPECTED_MINUTE_3.plusSeconds(60)
+        ));
     }
 
     @Test
@@ -573,6 +592,76 @@ class HistoryKlineSyncWorkerTest {
         }
     }
 
+    private static final class FakeStockKlineMissingRecordRepository implements StockKlineMissingRecordRepository {
+        private final List<StockKlineMissingRecordEntity> records = new ArrayList<>();
+
+        @Override
+        public Long create(StockKlineMissingRecordEntity entity) {
+            entity.setId((long) records.size() + 1);
+            records.add(entity);
+            return entity.getId();
+        }
+
+        @Override
+        public boolean update(StockKlineMissingRecordEntity entity) {
+            records.removeIf(record -> record.getId().equals(entity.getId()));
+            records.add(entity);
+            return true;
+        }
+
+        @Override
+        public boolean upsertMissingDate(StockKlineMissingRecordEntity entity) {
+            records.removeIf(record -> record.getSymbol().equals(entity.getSymbol())
+                    && record.getDataType().equals(entity.getDataType())
+                    && record.getDataSource().equals(entity.getDataSource())
+                    && record.getMissingDate().equals(entity.getMissingDate()));
+            create(entity);
+            return true;
+        }
+
+        @Override
+        public boolean deleteById(Long id) {
+            return records.removeIf(record -> record.getId().equals(id));
+        }
+
+        @Override
+        public Optional<StockKlineMissingRecordEntity> findById(Long id) {
+            return records.stream().filter(record -> record.getId().equals(id)).findFirst();
+        }
+
+        @Override
+        public Optional<StockKlineMissingRecordEntity> findBySymbolAndDataTypeAndDataSourceAndMissingDate(
+                String symbol,
+                String dataType,
+                String dataSource,
+                LocalDate missingDate) {
+            return records.stream()
+                    .filter(record -> record.getSymbol().equals(symbol))
+                    .filter(record -> record.getDataType().equals(dataType))
+                    .filter(record -> record.getDataSource().equals(dataSource))
+                    .filter(record -> record.getMissingDate().equals(missingDate))
+                    .findFirst();
+        }
+
+        @Override
+        public PageResult<StockKlineMissingRecordEntity> page(
+                com.fbw.finance.openfinancedb.controller.data.vo.req.StockKlineMissingRecordPageReqVO reqVO) {
+            return new PageResult<StockKlineMissingRecordEntity>(records, (long) records.size());
+        }
+
+        @Override
+        public List<LocalDate> findOpenMissingDates(String symbol, String dataType, LocalDate startDate, LocalDate endDate) {
+            return records.stream()
+                    .filter(record -> record.getSymbol().equals(symbol))
+                    .filter(record -> record.getDataType().equals(dataType))
+                    .filter(record -> "OPEN".equals(record.getStatus()))
+                    .map(StockKlineMissingRecordEntity::getMissingDate)
+                    .filter(date -> !date.isBefore(startDate) && !date.isAfter(endDate))
+                    .sorted()
+                    .toList();
+        }
+    }
+
     private static final class FakeTradeCalendarRepository implements TradeCalendarRepository {
         private final List<LocalDate> openDates;
         private final boolean filterByRange;
@@ -737,6 +826,11 @@ class HistoryKlineSyncWorkerTest {
         public List<KlineBar> fetchRealtimeMinuteBars(List<String> symbols, KlinePeriod period) {
             fetchSymbols.addAll(symbols);
             return returnEmptyBars || symbols.isEmpty() ? List.of() : List.of(bar(symbols.getFirst(), EXPECTED_MINUTE));
+        }
+
+        @Override
+        public List<KlineBar> fetchDailyBars(String symbol, LocalDate startDateInclusive, LocalDate endDateInclusive) {
+            return List.of();
         }
 
         @Override

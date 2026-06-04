@@ -10,6 +10,8 @@ public final class ErrorCodeConstants {
 
     public static final Integer STOCK_SYNC_STATE_NOT_FOUND = 200200;
     public static final Integer STOCK_SYNC_STATE_UNIQUE_DUPLICATE = 200201;
+    public static final Integer STOCK_KLINE_MISSING_RECORD_NOT_FOUND = 200250;
+    public static final Integer STOCK_KLINE_MISSING_RECORD_UNIQUE_DUPLICATE = 200251;
 
     public static final Integer SYNC_LOG_NOT_FOUND = 200300;
     public static final Integer SYNC_LOG_LOG_ID_DUPLICATE = 200301;
@@ -20,6 +22,7 @@ public final class ErrorCodeConstants {
     public static final Integer KLINE_DATA_INCOMPLETE = 200500;
     public static final Integer KLINE_PERIOD_UNSUPPORTED = 200501;
     public static final Integer KLINE_TIME_RANGE_INVALID = 200502;
+    public static final Integer KLINE_STOCK_NOT_LISTED = 200503;
 
     public static final Integer TUSHARE_API_ERROR = 200600;
     public static final Integer TUSHARE_QPS_LIMIT_EXCEEDED = 200601;
@@ -29,6 +32,12 @@ public final class ErrorCodeConstants {
     public static final Integer INFLUX_QUERY_FAILED = 200701;
 
     public static final Integer HTTP_EXECUTION_FAILED = 200800;
+
+    public static final Integer API_KEY_NOT_FOUND = 200900;
+    public static final Integer API_KEY_UNAUTHORIZED = 200901;
+    public static final Integer API_KEY_FORBIDDEN = 200902;
+    public static final Integer API_KEY_QPS_LIMIT_EXCEEDED = 200903;
+    public static final Integer API_KEY_DAILY_QUOTA_EXCEEDED = 200904;
 
     private ErrorCodeConstants() {
     }

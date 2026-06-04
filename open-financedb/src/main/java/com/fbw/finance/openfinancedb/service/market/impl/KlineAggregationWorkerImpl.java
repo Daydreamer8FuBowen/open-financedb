@@ -2,6 +2,7 @@ package com.fbw.finance.openfinancedb.service.market.impl;
 
 import com.fbw.finance.openfinancedb.datasource.tushare.TushareRateLimitExceededException;
 import com.fbw.finance.openfinancedb.model.entity.data.StockInfoEntity;
+import com.fbw.finance.openfinancedb.model.entity.data.StockKlineMissingRecordEntity;
 import com.fbw.finance.openfinancedb.model.entity.data.StockSyncStateEntity;
 import com.fbw.finance.openfinancedb.model.entity.data.TradeCalendarEntity;
 import com.fbw.finance.openfinancedb.model.enums.SyncDataType;
@@ -9,6 +10,7 @@ import com.fbw.finance.openfinancedb.model.enums.SyncStatus;
 import com.fbw.finance.openfinancedb.model.market.KlineBar;
 import com.fbw.finance.openfinancedb.model.market.KlinePeriod;
 import com.fbw.finance.openfinancedb.repository.data.StockInfoRepository;
+import com.fbw.finance.openfinancedb.repository.data.StockKlineMissingRecordRepository;
 import com.fbw.finance.openfinancedb.repository.data.StockSyncStateRepository;
 import com.fbw.finance.openfinancedb.repository.data.TradeCalendarRepository;
 import com.fbw.finance.openfinancedb.repository.market.KlineRepository;
@@ -27,6 +29,8 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -55,6 +59,7 @@ public class KlineAggregationWorkerImpl implements KlineAggregationWorker {
 
     private final StockInfoRepository stockInfoRepository;
     private final StockSyncStateRepository stockSyncStateRepository;
+    private final StockKlineMissingRecordRepository stockKlineMissingRecordRepository;
     private final KlineRepository klineRepository;
     private final TradeMinuteWindowService tradeMinuteWindowService;
     private final TradeCalendarRepository tradeCalendarRepository;
@@ -71,6 +76,7 @@ public class KlineAggregationWorkerImpl implements KlineAggregationWorker {
     public KlineAggregationWorkerImpl(
             StockInfoRepository stockInfoRepository,
             StockSyncStateRepository stockSyncStateRepository,
+            StockKlineMissingRecordRepository stockKlineMissingRecordRepository,
             KlineRepository klineRepository,
             TradeMinuteWindowService tradeMinuteWindowService,
             TradeCalendarRepository tradeCalendarRepository,
@@ -79,6 +85,7 @@ public class KlineAggregationWorkerImpl implements KlineAggregationWorker {
         this(
                 stockInfoRepository,
                 stockSyncStateRepository,
+                stockKlineMissingRecordRepository,
                 klineRepository,
                 tradeMinuteWindowService,
                 tradeCalendarRepository,
@@ -99,8 +106,34 @@ public class KlineAggregationWorkerImpl implements KlineAggregationWorker {
             Duration idleSleep,
             List<KlinePeriod> targetPeriods,
             Clock clock) {
+        this(
+                stockInfoRepository,
+                stockSyncStateRepository,
+                new NoopStockKlineMissingRecordRepository(),
+                klineRepository,
+                tradeMinuteWindowService,
+                tradeCalendarRepository,
+                defaultStartDate,
+                idleSleep,
+                targetPeriods,
+                clock
+        );
+    }
+
+    public KlineAggregationWorkerImpl(
+            StockInfoRepository stockInfoRepository,
+            StockSyncStateRepository stockSyncStateRepository,
+            StockKlineMissingRecordRepository stockKlineMissingRecordRepository,
+            KlineRepository klineRepository,
+            TradeMinuteWindowService tradeMinuteWindowService,
+            TradeCalendarRepository tradeCalendarRepository,
+            LocalDate defaultStartDate,
+            Duration idleSleep,
+            List<KlinePeriod> targetPeriods,
+            Clock clock) {
         this.stockInfoRepository = stockInfoRepository;
         this.stockSyncStateRepository = stockSyncStateRepository;
+        this.stockKlineMissingRecordRepository = stockKlineMissingRecordRepository;
         this.klineRepository = klineRepository;
         this.tradeMinuteWindowService = tradeMinuteWindowService;
         this.tradeCalendarRepository = tradeCalendarRepository;
@@ -201,6 +234,13 @@ public class KlineAggregationWorkerImpl implements KlineAggregationWorker {
         List<Instant> expectedMinutes = expectedMinutes(stock, cursor, targetMinute);
         if (expectedMinutes.isEmpty()) {
             return false;
+        }
+        MissingDateFiltering missingDateFiltering = filterKnownMissingDates(symbol, expectedMinutes);
+        expectedMinutes = missingDateFiltering.expectedMinutes();
+        if (expectedMinutes.isEmpty()) {
+            Instant nextCursor = targetMinute.plus(Duration.ofMinutes(1));
+            persistState(state, stock, dataType, nextCursor, targetMinute, true, null);
+            return !missingDateFiltering.missingDates().isEmpty();
         }
 
         List<KlineBar> minuteBars = klineRepository.query(
@@ -352,6 +392,28 @@ public class KlineAggregationWorkerImpl implements KlineAggregationWorker {
                 .filter(time -> !time.isBefore(cursor) && !time.isAfter(latestMinute))
                 .sorted()
                 .toList();
+    }
+
+    private MissingDateFiltering filterKnownMissingDates(String symbol, List<Instant> expectedMinutes) {
+        if (expectedMinutes.isEmpty()) {
+            return new MissingDateFiltering(expectedMinutes, List.of());
+        }
+        LocalDate startDate = LocalDateTime.ofInstant(expectedMinutes.getFirst(), MARKET_ZONE).toLocalDate();
+        LocalDate endDate = LocalDateTime.ofInstant(expectedMinutes.getLast(), MARKET_ZONE).toLocalDate();
+        List<LocalDate> missingDates = stockKlineMissingRecordRepository.findOpenMissingDates(
+                symbol,
+                SyncDataType.KLINE_1M.getCode(),
+                startDate,
+                endDate
+        );
+        if (missingDates.isEmpty()) {
+            return new MissingDateFiltering(expectedMinutes, List.of());
+        }
+        Set<LocalDate> missingDateSet = Set.copyOf(missingDates);
+        List<Instant> filtered = expectedMinutes.stream()
+                .filter(time -> !missingDateSet.contains(LocalDateTime.ofInstant(time, MARKET_ZONE).toLocalDate()))
+                .toList();
+        return new MissingDateFiltering(filtered, missingDates);
     }
 
     private KlineBar aggregateWindow(List<KlineBar> minuteBars, KlinePeriod targetPeriod) {
@@ -526,6 +588,57 @@ public class KlineAggregationWorkerImpl implements KlineAggregationWorker {
             Thread.sleep(duration.toMillis());
         } catch (InterruptedException ex) {
             Thread.currentThread().interrupt();
+        }
+    }
+
+    private record MissingDateFiltering(List<Instant> expectedMinutes, List<LocalDate> missingDates) {
+    }
+
+    private static final class NoopStockKlineMissingRecordRepository implements StockKlineMissingRecordRepository {
+
+        @Override
+        public Long create(StockKlineMissingRecordEntity entity) {
+            return null;
+        }
+
+        @Override
+        public boolean update(StockKlineMissingRecordEntity entity) {
+            return true;
+        }
+
+        @Override
+        public boolean upsertMissingDate(StockKlineMissingRecordEntity entity) {
+            return true;
+        }
+
+        @Override
+        public boolean deleteById(Long id) {
+            return true;
+        }
+
+        @Override
+        public Optional<StockKlineMissingRecordEntity> findById(Long id) {
+            return Optional.empty();
+        }
+
+        @Override
+        public Optional<StockKlineMissingRecordEntity> findBySymbolAndDataTypeAndDataSourceAndMissingDate(
+                String symbol,
+                String dataType,
+                String dataSource,
+                LocalDate missingDate) {
+            return Optional.empty();
+        }
+
+        @Override
+        public com.fbw.finance.openfinancedb.framework.web.PageResult<StockKlineMissingRecordEntity> page(
+                com.fbw.finance.openfinancedb.controller.data.vo.req.StockKlineMissingRecordPageReqVO reqVO) {
+            return new com.fbw.finance.openfinancedb.framework.web.PageResult<>(List.of(), 0L);
+        }
+
+        @Override
+        public List<LocalDate> findOpenMissingDates(String symbol, String dataType, LocalDate startDate, LocalDate endDate) {
+            return List.of();
         }
     }
 }

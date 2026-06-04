@@ -2,14 +2,17 @@ package com.fbw.finance.openfinancedb.service.market.impl;
 
 import com.fbw.finance.openfinancedb.datasource.tushare.TushareKlineDataSource;
 import com.fbw.finance.openfinancedb.model.entity.data.StockInfoEntity;
+import com.fbw.finance.openfinancedb.model.entity.data.StockKlineMissingRecordEntity;
 import com.fbw.finance.openfinancedb.model.entity.data.StockSyncStateEntity;
 import com.fbw.finance.openfinancedb.model.entity.data.SyncLogEntity;
 import com.fbw.finance.openfinancedb.model.entity.data.TradeCalendarEntity;
 import com.fbw.finance.openfinancedb.model.enums.SyncDataType;
 import com.fbw.finance.openfinancedb.model.enums.SyncStatus;
+import com.fbw.finance.openfinancedb.model.enums.MissingRecordStatus;
 import com.fbw.finance.openfinancedb.model.market.KlineBar;
 import com.fbw.finance.openfinancedb.model.market.KlinePeriod;
 import com.fbw.finance.openfinancedb.repository.data.StockInfoRepository;
+import com.fbw.finance.openfinancedb.repository.data.StockKlineMissingRecordRepository;
 import com.fbw.finance.openfinancedb.repository.data.StockSyncStateRepository;
 import com.fbw.finance.openfinancedb.repository.data.SyncLogRepository;
 import com.fbw.finance.openfinancedb.repository.data.TradeCalendarRepository;
@@ -27,6 +30,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
@@ -35,6 +39,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -46,6 +51,7 @@ public class HistoryKlineSyncWorkerImpl implements HistoryKlineSyncWorker {
 
     private final StockInfoRepository stockInfoRepository;
     private final StockSyncStateRepository stockSyncStateRepository;
+    private final StockKlineMissingRecordRepository stockKlineMissingRecordRepository;
     private final SyncLogRepository syncLogRepository;
     private final TradeCalendarRepository tradeCalendarRepository;
     private final KlineRepository klineRepository;
@@ -62,6 +68,33 @@ public class HistoryKlineSyncWorkerImpl implements HistoryKlineSyncWorker {
         return thread;
     });
 
+    @Autowired
+    public HistoryKlineSyncWorkerImpl(
+            StockInfoRepository stockInfoRepository,
+            StockSyncStateRepository stockSyncStateRepository,
+            StockKlineMissingRecordRepository stockKlineMissingRecordRepository,
+            SyncLogRepository syncLogRepository,
+            TradeCalendarRepository tradeCalendarRepository,
+            KlineRepository klineRepository,
+            TushareKlineDataSource tushareKlineDataSource,
+            TradeMinuteWindowService tradeMinuteWindowService,
+            @Value("${finance.history-sync.default-start-date:2015-01-01}") LocalDate defaultStartDate,
+            @Value("${finance.history-sync.idle-sleep:30s}") Duration idleSleep) {
+        this(
+                stockInfoRepository,
+                stockSyncStateRepository,
+                stockKlineMissingRecordRepository,
+                syncLogRepository,
+                tradeCalendarRepository,
+                klineRepository,
+                tushareKlineDataSource,
+                tradeMinuteWindowService,
+                defaultStartDate,
+                idleSleep,
+                Clock.systemUTC()
+        );
+    }
+
     public HistoryKlineSyncWorkerImpl(
             StockInfoRepository stockInfoRepository,
             StockSyncStateRepository stockSyncStateRepository,
@@ -70,8 +103,8 @@ public class HistoryKlineSyncWorkerImpl implements HistoryKlineSyncWorker {
             KlineRepository klineRepository,
             TushareKlineDataSource tushareKlineDataSource,
             TradeMinuteWindowService tradeMinuteWindowService,
-            @Value("${finance.history-sync.default-start-date:2015-01-01}") LocalDate defaultStartDate,
-            @Value("${finance.history-sync.idle-sleep:30s}") Duration idleSleep) {
+            LocalDate defaultStartDate,
+            Duration idleSleep) {
         this(
                 stockInfoRepository,
                 stockSyncStateRepository,
@@ -97,8 +130,36 @@ public class HistoryKlineSyncWorkerImpl implements HistoryKlineSyncWorker {
             LocalDate defaultStartDate,
             Duration idleSleep,
             Clock clock) {
+        this(
+                stockInfoRepository,
+                stockSyncStateRepository,
+                new NoopStockKlineMissingRecordRepository(),
+                syncLogRepository,
+                tradeCalendarRepository,
+                klineRepository,
+                tushareKlineDataSource,
+                tradeMinuteWindowService,
+                defaultStartDate,
+                idleSleep,
+                clock
+        );
+    }
+
+    public HistoryKlineSyncWorkerImpl(
+            StockInfoRepository stockInfoRepository,
+            StockSyncStateRepository stockSyncStateRepository,
+            StockKlineMissingRecordRepository stockKlineMissingRecordRepository,
+            SyncLogRepository syncLogRepository,
+            TradeCalendarRepository tradeCalendarRepository,
+            KlineRepository klineRepository,
+            TushareKlineDataSource tushareKlineDataSource,
+            TradeMinuteWindowService tradeMinuteWindowService,
+            LocalDate defaultStartDate,
+            Duration idleSleep,
+            Clock clock) {
         this.stockInfoRepository = stockInfoRepository;
         this.stockSyncStateRepository = stockSyncStateRepository;
+        this.stockKlineMissingRecordRepository = stockKlineMissingRecordRepository;
         this.syncLogRepository = syncLogRepository;
         this.tradeCalendarRepository = tradeCalendarRepository;
         this.klineRepository = klineRepository;
@@ -196,7 +257,7 @@ public class HistoryKlineSyncWorkerImpl implements HistoryKlineSyncWorker {
         StockSyncStateEntity state = stockSyncStateRepository
                 .findBySymbolAndDataType(stock.getSymbol(), SyncDataType.KLINE_1M.getCode())
                 .orElseGet(() -> newState(stock));
-        if (SyncStatus.INCOMPLETE.getCode().equals(state.getSyncStatus())) {
+        if (false && SyncStatus.INCOMPLETE.getCode().equals(state.getSyncStatus())) {
             log.warn("历史分钟线同步：symbol={} 已标记为数据不完整，跳过后续同步", stock.getSymbol());
             return false;
         }
@@ -275,12 +336,16 @@ public class HistoryKlineSyncWorkerImpl implements HistoryKlineSyncWorker {
             log.info("历史分钟线同步：symbol={} 从 Tushare 获取 {} 条分钟线，开始写入 InfluxDB", stock.getSymbol(), fetchedBars.size());
 
             if (fetchedBars.isEmpty()) {
-                if (hasEarlierLocalData) {
-                    throw new KlineIntegrityException(stock.getSymbol(), expectedMinutes.size(), 0, expectedMinutes.stream()
-                            .limit(5)
-                            .toList());
-                }
-                advanceStateForInitialGap(state, stock, sliceEndExclusive, targetSyncTime);
+                MissingDayFiltering filtered = filterMissingDays(stock.getSymbol(), expectedMinutes, fetchedBars);
+                recordMissingDates(stock.getSymbol(), filtered.missingDates());
+                advanceStateOnSuccessfulSlice(
+                        state,
+                        stock,
+                        sliceEndExclusive,
+                        sliceLatestExpectedTime,
+                        targetSyncTime,
+                        true
+                );
                 writeSyncLog(
                         stock.getSymbol(),
                         sliceStart,
@@ -305,14 +370,19 @@ public class HistoryKlineSyncWorkerImpl implements HistoryKlineSyncWorker {
                     expectedMinutes,
                     fetchedBars
             );
+            MissingDayFiltering filtered = filterMissingDays(stock.getSymbol(), expectedMinutes, fetchedBars);
+            recordMissingDates(stock.getSymbol(), filtered.missingDates());
+            fetchedBars = filtered.bars();
 
             long writeStartMillis = System.currentTimeMillis();
-            klineRepository.upsert(fetchedBars);
+            if (!fetchedBars.isEmpty()) {
+                klineRepository.upsert(fetchedBars);
+            }
             writeLatencyMs = System.currentTimeMillis() - writeStartMillis;
             writtenCount = fetchedBars.size();
 
             long verifyStartMillis = System.currentTimeMillis();
-            if (prefixFallback.hasMissingPrefix() && !hasEarlierLocalData) {
+            if (false && prefixFallback.hasMissingPrefix() && !hasEarlierLocalData) {
                 log.warn("历史分钟线同步：symbol={} 片段={} 至 {} Tushare 前置缺失 {} 个预期分钟，数据起点移动到 {}",
                         stock.getSymbol(), sliceStart, sliceEndExclusive, prefixFallback.skippedCount(), prefixFallback.dataStart());
                 assertSliceComplete(stock.getSymbol(), sliceStart, sliceEndExclusive, prefixFallback.expectedForValidation());
@@ -328,9 +398,9 @@ public class HistoryKlineSyncWorkerImpl implements HistoryKlineSyncWorker {
                         true
                 );
             } else {
-                assertSliceComplete(stock.getSymbol(), sliceStart, sliceEndExclusive, expectedMinutes);
+                assertSliceComplete(stock.getSymbol(), sliceStart, sliceEndExclusive, filtered.expectedMinutes());
                 LocalDateTime startTimeCandidate = !hasEarlierLocalData
-                        ? toLocalDateTime(expectedMinutes.getFirst())
+                        ? firstCompleteStart(filtered.expectedMinutes(), sliceEndExclusive)
                         : state.getStartTime();
                 advanceStateOnSuccessfulSlice(
                         state,
@@ -577,6 +647,75 @@ public class HistoryKlineSyncWorkerImpl implements HistoryKlineSyncWorker {
                 .toList();
     }
 
+    private MissingDayFiltering filterMissingDays(String symbol, List<Instant> expectedMinutes, List<KlineBar> bars) {
+        if (expectedMinutes.isEmpty()) {
+            return new MissingDayFiltering(List.of(), List.of(), filterCompleteBars(symbol, bars, Set.of()));
+        }
+        Map<LocalDate, List<Instant>> expectedByDate = new HashMap<>();
+        for (Instant expected : expectedMinutes) {
+            LocalDate date = toLocalDateTime(expected).toLocalDate();
+            expectedByDate.computeIfAbsent(date, ignored -> new java.util.ArrayList<>()).add(expected);
+        }
+        Set<Instant> fetchedCompleteTimes = new HashSet<>();
+        if (bars != null) {
+            for (KlineBar bar : bars) {
+                if (symbol.equals(bar.symbol()) && bar.period() == KlinePeriod.MINUTE_1 && bar.complete()) {
+                    fetchedCompleteTimes.add(bar.time());
+                }
+            }
+        }
+        Set<LocalDate> missingDates = new HashSet<>();
+        for (Map.Entry<LocalDate, List<Instant>> entry : expectedByDate.entrySet()) {
+            if (!fetchedCompleteTimes.containsAll(entry.getValue())) {
+                missingDates.add(entry.getKey());
+            }
+        }
+        Set<LocalDate> completeDates = new HashSet<>(expectedByDate.keySet());
+        completeDates.removeAll(missingDates);
+        List<Instant> completeExpected = expectedMinutes.stream()
+                .filter(expected -> completeDates.contains(toLocalDateTime(expected).toLocalDate()))
+                .toList();
+        return new MissingDayFiltering(
+                completeExpected,
+                missingDates.stream().sorted().toList(),
+                filterCompleteBars(symbol, bars, completeDates)
+        );
+    }
+
+    private List<KlineBar> filterCompleteBars(String symbol, List<KlineBar> bars, Set<LocalDate> completeDates) {
+        if (bars == null || bars.isEmpty() || completeDates.isEmpty()) {
+            return List.of();
+        }
+        return bars.stream()
+                .filter(KlineBar::complete)
+                .filter(bar -> symbol.equals(bar.symbol()))
+                .filter(bar -> bar.period() == KlinePeriod.MINUTE_1)
+                .filter(bar -> completeDates.contains(toLocalDateTime(bar.time()).toLocalDate()))
+                .sorted(java.util.Comparator.comparing(KlineBar::time))
+                .toList();
+    }
+
+    private void recordMissingDates(String symbol, List<LocalDate> missingDates) {
+        for (LocalDate missingDate : missingDates) {
+            StockKlineMissingRecordEntity entity = new StockKlineMissingRecordEntity();
+            entity.setSymbol(symbol);
+            entity.setDataType(SyncDataType.KLINE_1M.getCode());
+            entity.setDataSource("tushare");
+            entity.setMissingDate(missingDate);
+            entity.setStatus(MissingRecordStatus.OPEN.getCode());
+            entity.setDetectedAt(LocalDateTime.now(MARKET_ZONE));
+            entity.setRemark("historical minute kline missing from tushare");
+            stockKlineMissingRecordRepository.upsertMissingDate(entity);
+        }
+    }
+
+    private LocalDateTime firstCompleteStart(List<Instant> expectedMinutes, LocalDateTime fallback) {
+        if (expectedMinutes.isEmpty()) {
+            return fallback;
+        }
+        return toLocalDateTime(expectedMinutes.getFirst());
+    }
+
     private boolean hasEarlierLocalData(String symbol, LocalDateTime sliceStart) {
         Instant sliceStartInstant = sliceStart.atZone(MARKET_ZONE).toInstant();
         return klineRepository.findEarliestTime(symbol, KlinePeriod.MINUTE_1)
@@ -821,5 +960,59 @@ public class HistoryKlineSyncWorkerImpl implements HistoryKlineSyncWorker {
             LocalDateTime dataStart,
             int skippedCount,
             List<Instant> expectedForValidation) {
+    }
+
+    private record MissingDayFiltering(
+            List<Instant> expectedMinutes,
+            List<LocalDate> missingDates,
+            List<KlineBar> bars) {
+    }
+
+    private static final class NoopStockKlineMissingRecordRepository implements StockKlineMissingRecordRepository {
+
+        @Override
+        public Long create(StockKlineMissingRecordEntity entity) {
+            return null;
+        }
+
+        @Override
+        public boolean update(StockKlineMissingRecordEntity entity) {
+            return true;
+        }
+
+        @Override
+        public boolean upsertMissingDate(StockKlineMissingRecordEntity entity) {
+            return true;
+        }
+
+        @Override
+        public boolean deleteById(Long id) {
+            return true;
+        }
+
+        @Override
+        public Optional<StockKlineMissingRecordEntity> findById(Long id) {
+            return Optional.empty();
+        }
+
+        @Override
+        public Optional<StockKlineMissingRecordEntity> findBySymbolAndDataTypeAndDataSourceAndMissingDate(
+                String symbol,
+                String dataType,
+                String dataSource,
+                LocalDate missingDate) {
+            return Optional.empty();
+        }
+
+        @Override
+        public com.fbw.finance.openfinancedb.framework.web.PageResult<StockKlineMissingRecordEntity> page(
+                com.fbw.finance.openfinancedb.controller.data.vo.req.StockKlineMissingRecordPageReqVO reqVO) {
+            return new com.fbw.finance.openfinancedb.framework.web.PageResult<>(List.of(), 0L);
+        }
+
+        @Override
+        public List<LocalDate> findOpenMissingDates(String symbol, String dataType, LocalDate startDate, LocalDate endDate) {
+            return List.of();
+        }
     }
 }

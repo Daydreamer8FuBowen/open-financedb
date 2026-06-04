@@ -36,6 +36,8 @@ public interface TushareKlineDataSource {
         return fetchRealtimeMinuteBars(List.of(symbol), period);
     }
 
+    List<KlineBar> fetchDailyBars(String symbol, LocalDate startDateInclusive, LocalDate endDateInclusive);
+
     /**
      * Fetch today's intraday minute bars through Tushare rt_min_daily for one symbol.
      */

@@ -339,12 +339,18 @@ The cache is an optimization only. InfluxDB remains the durable source. Cache en
 
 ### 6.5 Incremental Aggregation
 
-`stock_sync_state` tracks the `1m` sync cursor. Aggregation should maintain separate logical state using either:
+`stock_sync_state` tracks the `1m` sync cursor and derived-period aggregation cursors. Aggregation uses separate rows with `data_type = kline_5m`, `kline_15m`, `kline_30m`, `kline_1h`, and `kline_1d`.
 
-1. `stock_sync_state` rows with `data_type = kline_5m`, `kline_15m`, etc.
-2. A future dedicated aggregation state table.
+The table keeps the legacy sync fields and adds explicit cursor fields for derived tasks:
 
-Recommended first phase: reuse `stock_sync_state` with new `SyncDataType` values because it already has cursor, target, status, retry, and error fields.
+```text
+cursor_time = next source minute that must be processed
+source_latest_time = latest 1m source point consumed by a successful derived write
+latest_sync_time = compatible high-water mark for list and dashboard views
+target_sync_time = latest 1m source point seen during the latest scan
+```
+
+Aggregation does not maintain a permanent completion flag. It scans frequently and advances `cursor_time` only after contiguous complete windows are written.
 
 Aggregation can advance only up to the latest complete source `1m` window.
 
@@ -593,6 +599,8 @@ data_type = minute_1m
 start_time = initial sync lower bound
 latest_sync_time = last successfully persisted point or slice end
 target_sync_time = desired upper bound
+cursor_time = next required processing cursor
+source_latest_time = latest source point consumed by derived aggregation
 sync_status = PENDING | RUNNING | SUCCESS | FAILED | RETRYING | PAUSED
 retry_count
 last_error

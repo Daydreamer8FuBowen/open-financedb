@@ -2,266 +2,109 @@ package com.fbw.finance.openfinancedb.service.market;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fbw.finance.openfinancedb.datasource.tushare.TushareKlineDataSource;
-import com.fbw.finance.openfinancedb.framework.web.PageResult;
+import com.fbw.finance.openfinancedb.framework.exception.ErrorCodeConstants;
+import com.fbw.finance.openfinancedb.framework.exception.ServiceException;
 import com.fbw.finance.openfinancedb.model.entity.data.StockInfoEntity;
 import com.fbw.finance.openfinancedb.model.entity.data.StockSyncStateEntity;
 import com.fbw.finance.openfinancedb.model.enums.SyncDataType;
 import com.fbw.finance.openfinancedb.model.enums.SyncStatus;
 import com.fbw.finance.openfinancedb.model.market.KlineBar;
-import com.fbw.finance.openfinancedb.model.market.KlineQueryResult;
+import com.fbw.finance.openfinancedb.model.market.KlineCompleteness;
 import com.fbw.finance.openfinancedb.model.market.KlinePeriod;
 import com.fbw.finance.openfinancedb.model.market.KlineQuery;
+import com.fbw.finance.openfinancedb.model.market.KlineQueryResult;
 import com.fbw.finance.openfinancedb.repository.data.StockInfoRepository;
 import com.fbw.finance.openfinancedb.repository.data.StockSyncStateRepository;
+import com.fbw.finance.openfinancedb.repository.market.KlineRepository;
 import com.fbw.finance.openfinancedb.repository.market.impl.InMemoryKlineRepository;
+import com.fbw.finance.openfinancedb.service.data.StockInfoService;
 import com.fbw.finance.openfinancedb.service.market.impl.KlineQueryServiceImpl;
-import com.fbw.finance.openfinancedb.service.market.impl.KlineAggregationServiceImpl;
-import java.time.Clock;
 import java.math.BigDecimal;
+import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.util.Collection;
 import java.util.List;
+import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
 class KlineQueryServiceTest {
 
     private static final ZoneId MARKET_ZONE = ZoneId.of("Asia/Shanghai");
-    private static final Clock FIXED_CLOCK = Clock.fixed(Instant.parse("2026-05-28T03:35:00Z"), MARKET_ZONE);
+    private static final Instant FIRST_BAR_TIME = LocalDateTime.of(2026, 5, 28, 9, 31).atZone(MARKET_ZONE).toInstant();
+    private static final Instant SECOND_BAR_TIME = LocalDateTime.of(2026, 5, 28, 9, 32).atZone(MARKET_ZONE).toInstant();
+    private static final Instant THIRD_BAR_TIME = LocalDateTime.of(2026, 5, 28, 9, 33).atZone(MARKET_ZONE).toInstant();
 
     @Test
-    void shouldReadRequestedPeriodFirstWhenComplete() {
-        InMemoryKlineRepository repository = new InMemoryKlineRepository();
-        RecordingCompletionService completionService = new RecordingCompletionService(repository);
-        Instant start = Instant.parse("2024-01-10T01:30:00Z");
-        KlineQueryService service = new KlineQueryServiceImpl(repository, new KlineAggregationServiceImpl(),
-                completionService, new NoopStockInfoRepository(), new NoopStockSyncStateRepository(),
-                new NoopTushareKlineDataSource(), new FixedTradeMinuteWindowService(List.of(start)), FIXED_CLOCK);
-        repository.upsert(List.of(bar(KlinePeriod.MINUTE_5, start, "10", "10")));
-
-        List<KlineBar> result = service.query(new KlineQuery("000001.SZ", KlinePeriod.MINUTE_5, start, start.plusSeconds(300)));
-
-        assertEquals(1, result.size());
-        assertEquals(KlinePeriod.MINUTE_5, result.getFirst().period());
-        assertFalse(completionService.called);
-    }
-
-    @Test
-    void shouldAggregateFromCompleteMinuteDataWhenRequestedPeriodIsMissing() {
-        InMemoryKlineRepository repository = new InMemoryKlineRepository();
-        RecordingCompletionService completionService = new RecordingCompletionService(repository);
-        Instant start = Instant.parse("2024-01-10T01:30:00Z");
-        KlineQueryService service = new KlineQueryServiceImpl(repository, new KlineAggregationServiceImpl(),
-                completionService, new NoopStockInfoRepository(), new NoopStockSyncStateRepository(),
-                new NoopTushareKlineDataSource(), new FixedTradeMinuteWindowService(List.of(
-                        start,
-                        start.plusSeconds(60),
-                        start.plusSeconds(120),
-                        start.plusSeconds(180),
-                        start.plusSeconds(240))), FIXED_CLOCK);
-        repository.upsert(List.of(
-                bar(KlinePeriod.MINUTE_1, start, "10", "11"),
-                bar(KlinePeriod.MINUTE_1, start.plusSeconds(60), "11", "12"),
-                bar(KlinePeriod.MINUTE_1, start.plusSeconds(120), "12", "13"),
-                bar(KlinePeriod.MINUTE_1, start.plusSeconds(180), "13", "14"),
-                bar(KlinePeriod.MINUTE_1, start.plusSeconds(240), "14", "15")
+    void shouldEnableRealtimeSyncAndFallbackToTushareWhenStockHasNotStartedHistorySync() {
+        RecordingKlineRepository repository = new RecordingKlineRepository();
+        FakeStockInfoRepository stockInfoRepository = new FakeStockInfoRepository(disabledListedStock());
+        FakeStockSyncStateRepository stateRepository = new FakeStockSyncStateRepository(null);
+        FakeTushareKlineDataSource tushare = new FakeTushareKlineDataSource(List.of(
+                bar(KlinePeriod.MINUTE_1, FIRST_BAR_TIME, "21", "22"),
+                bar(KlinePeriod.MINUTE_1, SECOND_BAR_TIME, "22", "23")
         ));
-
-        List<KlineBar> result = service.query(new KlineQuery("000001.SZ", KlinePeriod.MINUTE_5, start, start.plusSeconds(300)));
-
-        assertEquals(1, result.size());
-        assertEquals(KlinePeriod.MINUTE_5, result.getFirst().period());
-        assertEquals(new BigDecimal("10"), result.getFirst().open());
-        assertEquals(new BigDecimal("15"), result.getFirst().close());
-        assertFalse(completionService.called);
-    }
-
-    @Test
-    void shouldInvokeCompletionWhenMinuteDataIsMissing() {
-        InMemoryKlineRepository repository = new InMemoryKlineRepository();
-        RecordingCompletionService completionService = new RecordingCompletionService(repository);
-        Instant start = Instant.parse("2024-01-10T01:30:00Z");
-        KlineQueryService service = new KlineQueryServiceImpl(repository, new KlineAggregationServiceImpl(),
-                completionService, new NoopStockInfoRepository(), new NoopStockSyncStateRepository(),
-                new NoopTushareKlineDataSource(), new FixedTradeMinuteWindowService(List.of(start)), FIXED_CLOCK);
-
-        List<KlineBar> result = service.query(new KlineQuery("000001.SZ", KlinePeriod.MINUTE_1, start, start.plusSeconds(60)));
-
-        assertTrue(completionService.called);
-        assertEquals(1, result.size());
-        assertEquals(KlinePeriod.MINUTE_1, result.getFirst().period());
-    }
-
-    @Test
-    void shouldNotInvokeCompletionAcrossLunchBreakWhenTradingBarsAreComplete() {
-        InMemoryKlineRepository repository = new InMemoryKlineRepository();
-        RecordingCompletionService completionService = new RecordingCompletionService(repository);
-        Instant morningClose = LocalDateTime.of(2024, 1, 10, 11, 30).atZone(MARKET_ZONE).toInstant();
-        Instant afternoonOpen = LocalDateTime.of(2024, 1, 10, 13, 1).atZone(MARKET_ZONE).toInstant();
-        repository.upsert(List.of(
-                bar(KlinePeriod.MINUTE_1, morningClose, "10", "10"),
-                bar(KlinePeriod.MINUTE_1, afternoonOpen, "11", "11")
-        ));
-        KlineQueryService service = new KlineQueryServiceImpl(repository, new KlineAggregationServiceImpl(),
-                completionService, new RecordingStockInfoRepository(true), new NoopStockSyncStateRepository(),
-                new NoopTushareKlineDataSource(), new FixedTradeMinuteWindowService(List.of(morningClose, afternoonOpen)),
-                FIXED_CLOCK);
-
-        List<KlineBar> result = service.query(new KlineQuery(
-                "000001.SZ",
-                KlinePeriod.MINUTE_1,
-                morningClose,
-                afternoonOpen.plusSeconds(60)));
-
-        assertFalse(completionService.called);
-        assertEquals(List.of(morningClose, afternoonOpen), result.stream().map(KlineBar::time).toList());
-    }
-
-    @Test
-    void shouldClampHistoryQueryToRecordedStartTimeWithoutTushareCompletion() {
-        InMemoryKlineRepository repository = new InMemoryKlineRepository();
-        Instant dataFloor = LocalDateTime.of(2024, 2, 1, 9, 31).atZone(MARKET_ZONE).toInstant();
-        repository.upsert(List.of(bar(KlinePeriod.MINUTE_1, dataFloor, "10", "11")));
-        RecordingCompletionService completionService = new RecordingCompletionService(repository);
-        RecordingStockSyncStateRepository stateRepository = new RecordingStockSyncStateRepository(false);
-        stateRepository.state.setStartTime(LocalDateTime.of(2024, 2, 1, 0, 0));
-        stateRepository.state.setLatestSyncTime(LocalDateTime.of(2024, 2, 15, 0, 0));
-        KlineQueryService service = new KlineQueryServiceImpl(repository, new KlineAggregationServiceImpl(),
-                completionService, new RecordingStockInfoRepository(true), stateRepository,
-                new NoopTushareKlineDataSource(), new FixedTradeMinuteWindowService(List.of(dataFloor)), FIXED_CLOCK);
-
-        List<KlineBar> result = service.query(new KlineQuery(
-                "000001.SZ",
-                KlinePeriod.MINUTE_1,
-                LocalDateTime.of(2024, 1, 1, 9, 31).atZone(MARKET_ZONE).toInstant(),
-                dataFloor.plusSeconds(60)));
-
-        assertFalse(completionService.called);
-        assertEquals(List.of(dataFloor), result.stream().map(KlineBar::time).toList());
-    }
-
-    @Test
-    void shouldEnableHistorySyncBeforeQueryingDisabledKnownStock() {
-        InMemoryKlineRepository repository = new InMemoryKlineRepository();
-        RecordingCompletionService completionService = new RecordingCompletionService(repository);
-        RecordingStockInfoRepository stockInfoRepository = new RecordingStockInfoRepository();
-        KlineQueryService service = new KlineQueryServiceImpl(repository, new KlineAggregationServiceImpl(),
-                completionService, stockInfoRepository, new NoopStockSyncStateRepository(),
-                new NoopTushareKlineDataSource(), new FixedTradeMinuteWindowService(List.of()), FIXED_CLOCK);
-        Instant start = Instant.parse("2024-01-10T01:30:00Z");
-
-        service.query(new KlineQuery("000001.SZ", KlinePeriod.MINUTE_1, start, start.plusSeconds(60)));
-
-        assertTrue(stockInfoRepository.batchUpdateCalled);
-        assertTrue(stockInfoRepository.stock.getIsRealtimeSyncEnabled());
-    }
-
-    @Test
-    void shouldReturnRemoteHistoricalAndRealtimeBarsWithoutPersistingWhenTodayQueryStockHasNoHistorySync() {
-        InMemoryKlineRepository repository = new InMemoryKlineRepository();
-        RecordingStockInfoRepository stockInfoRepository = new RecordingStockInfoRepository();
-        RecordingTushareKlineDataSource tushare = new RecordingTushareKlineDataSource();
-        Instant historyTime = LocalDateTime.of(2026, 5, 27, 9, 35).atZone(MARKET_ZONE).toInstant();
-        Instant realtimeTime = LocalDateTime.of(2026, 5, 28, 9, 35).atZone(MARKET_ZONE).toInstant();
-        tushare.historicalBars = List.of(bar(KlinePeriod.MINUTE_5, historyTime, "10", "11"));
-        tushare.realtimeBars = List.of(bar(KlinePeriod.MINUTE_5, realtimeTime, "12", "13"));
-        KlineQueryService service = new KlineQueryServiceImpl(repository, new KlineAggregationServiceImpl(),
-                new RecordingCompletionService(repository), stockInfoRepository, new NoopStockSyncStateRepository(),
-                tushare, new FixedTradeMinuteWindowService(List.of()), FIXED_CLOCK);
-
-        List<KlineBar> result = service.query(new KlineQuery(
-                "000001.SZ",
-                KlinePeriod.MINUTE_5,
-                LocalDateTime.of(2026, 5, 27, 9, 30).atZone(MARKET_ZONE).toInstant(),
-                LocalDateTime.of(2026, 5, 28, 11, 30).atZone(MARKET_ZONE).toInstant()));
-
-        assertEquals(List.of(historyTime, realtimeTime), result.stream().map(KlineBar::time).toList());
-        assertTrue(tushare.historicalCalled);
-        assertTrue(tushare.realtimeCalled);
-        assertTrue(repository.query("000001.SZ", KlinePeriod.MINUTE_5, historyTime.minusSeconds(1), realtimeTime.plusSeconds(1)).isEmpty());
-        assertTrue(stockInfoRepository.batchUpdateCalled);
-    }
-
-    @Test
-    void shouldReturnLocalPlusRealtimeBarsWhenHistoryCompleteButTodayLocalBarsAreIncomplete() {
-        InMemoryKlineRepository repository = new InMemoryKlineRepository();
-        Instant localTime = LocalDateTime.of(2026, 5, 28, 9, 30).atZone(MARKET_ZONE).toInstant();
-        Instant missingExpectedTime = LocalDateTime.of(2026, 5, 28, 9, 35).atZone(MARKET_ZONE).toInstant();
-        Instant realtimeTime = LocalDateTime.of(2026, 5, 28, 9, 35).atZone(MARKET_ZONE).toInstant();
-        repository.upsert(List.of(bar(KlinePeriod.MINUTE_5, localTime, "10", "11")));
-        RecordingStockInfoRepository stockInfoRepository = new RecordingStockInfoRepository(true);
-        RecordingStockSyncStateRepository stateRepository = new RecordingStockSyncStateRepository(true);
-        RecordingTushareKlineDataSource tushare = new RecordingTushareKlineDataSource();
-        tushare.realtimeBars = List.of(bar(KlinePeriod.MINUTE_5, realtimeTime, "12", "13"));
-        KlineQueryService service = new KlineQueryServiceImpl(repository, new KlineAggregationServiceImpl(),
-                new RecordingCompletionService(repository), stockInfoRepository, stateRepository, tushare,
-                new FixedTradeMinuteWindowService(List.of(localTime, missingExpectedTime)), FIXED_CLOCK);
-
-        List<KlineBar> result = service.query(new KlineQuery(
-                "000001.SZ",
-                KlinePeriod.MINUTE_5,
-                LocalDateTime.of(2026, 5, 28, 9, 30).atZone(MARKET_ZONE).toInstant(),
-                LocalDateTime.of(2026, 5, 28, 10, 0).atZone(MARKET_ZONE).toInstant()));
-
-        assertEquals(List.of(localTime, realtimeTime), result.stream().map(KlineBar::time).toList());
-        assertFalse(tushare.historicalCalled);
-        assertTrue(tushare.realtimeCalled);
-    }
-
-    @Test
-    void shouldReturnOnlyLocalBarsWhenHistoryCompleteAndTodayLocalBarsAreComplete() {
-        InMemoryKlineRepository repository = new InMemoryKlineRepository();
-        Instant firstTime = LocalDateTime.of(2026, 5, 28, 9, 30).atZone(MARKET_ZONE).toInstant();
-        Instant secondTime = LocalDateTime.of(2026, 5, 28, 9, 35).atZone(MARKET_ZONE).toInstant();
-        repository.upsert(List.of(
-                bar(KlinePeriod.MINUTE_5, firstTime, "10", "11"),
-                bar(KlinePeriod.MINUTE_5, secondTime, "11", "12")
-        ));
-        RecordingTushareKlineDataSource tushare = new RecordingTushareKlineDataSource();
-        KlineQueryService service = new KlineQueryServiceImpl(repository, new KlineAggregationServiceImpl(),
-                new RecordingCompletionService(repository), new RecordingStockInfoRepository(true),
-                new RecordingStockSyncStateRepository(true), tushare,
-                new FixedTradeMinuteWindowService(List.of(firstTime, secondTime)), FIXED_CLOCK);
-
-        List<KlineBar> result = service.query(new KlineQuery(
-                "000001.SZ",
-                KlinePeriod.MINUTE_5,
-                LocalDateTime.of(2026, 5, 28, 9, 30).atZone(MARKET_ZONE).toInstant(),
-                LocalDateTime.of(2026, 5, 28, 10, 0).atZone(MARKET_ZONE).toInstant()));
-
-        assertEquals(List.of(firstTime, secondTime), result.stream().map(KlineBar::time).toList());
-        assertFalse(tushare.historicalCalled);
-        assertFalse(tushare.realtimeCalled);
-    }
-
-    @Test
-    void shouldReturnAdjustedBarsAndResultCompleteness() {
-        InMemoryKlineRepository repository = new InMemoryKlineRepository();
-        Instant firstTime = LocalDateTime.of(2026, 5, 28, 9, 31).atZone(MARKET_ZONE).toInstant();
-        Instant secondTime = LocalDateTime.of(2026, 5, 28, 9, 32).atZone(MARKET_ZONE).toInstant();
-        repository.upsert(List.of(
-                bar(KlinePeriod.MINUTE_1, firstTime, "10", "11"),
-                bar(KlinePeriod.MINUTE_1, secondTime, "11", "12")
-        ));
-        RecordingForwardAdjustmentService adjustmentService = new RecordingForwardAdjustmentService();
-        KlineQueryService service = new KlineQueryServiceImpl(repository, new KlineAggregationServiceImpl(),
-                new RecordingCompletionService(repository), new RecordingStockInfoRepository(true),
-                new RecordingStockSyncStateRepository(true), new NoopTushareKlineDataSource(),
-                new FixedTradeMinuteWindowService(List.of(firstTime, secondTime)), adjustmentService, FIXED_CLOCK);
+        FakeStockInfoService stockInfoService = new FakeStockInfoService(stockInfoRepository);
+        KlineQueryService service = newService(
+                repository,
+                new NoopForwardAdjustmentService(),
+                stockInfoRepository,
+                stateRepository,
+                tushare,
+                stockInfoService
+        );
 
         KlineQueryResult result = service.queryResult(new KlineQuery(
                 "000001.SZ",
                 KlinePeriod.MINUTE_1,
-                firstTime,
-                secondTime.plusSeconds(60),
-                true));
+                FIRST_BAR_TIME.minusSeconds(60),
+                THIRD_BAR_TIME
+        ));
 
+        assertTrue(stockInfoService.enableCalled);
+        assertEquals(0, repository.queryCount);
+        assertEquals(2, result.list().size());
+        assertEquals(2, result.completeness().expectedCount());
+        assertEquals(2, result.completeness().actualCount());
+        assertEquals("000001.SZ", result.list().getFirst().symbol());
+    }
+
+    @Test
+    void shouldReadInfluxAndAdjustWhenHistoryIsComplete() {
+        RecordingKlineRepository repository = new RecordingKlineRepository();
+        repository.upsert(List.of(
+                bar(KlinePeriod.MINUTE_1, FIRST_BAR_TIME, "10", "11"),
+                bar(KlinePeriod.MINUTE_1, SECOND_BAR_TIME, "11", "12")
+        ));
+        FakeStockInfoRepository stockInfoRepository = new FakeStockInfoRepository(enabledListedStock());
+        FakeStockSyncStateRepository stateRepository = new FakeStockSyncStateRepository(successState(FIRST_BAR_TIME));
+        RecordingForwardAdjustmentService adjustmentService = new RecordingForwardAdjustmentService();
+        KlineQueryService service = newService(
+                repository,
+                adjustmentService,
+                stockInfoRepository,
+                stateRepository,
+                new FakeTushareKlineDataSource(List.of()),
+                new FakeStockInfoService(stockInfoRepository)
+        );
+
+        KlineQueryResult result = service.queryResult(new KlineQuery(
+                "000001.SZ",
+                KlinePeriod.MINUTE_1,
+                FIRST_BAR_TIME,
+                SECOND_BAR_TIME.plusSeconds(60),
+                true
+        ));
+
+        assertEquals(1, repository.queryCount);
+        assertTrue(repository.checkCompletenessCalled);
         assertTrue(adjustmentService.called);
-        assertTrue(result.adjusted());
         assertTrue(result.completeness().complete());
         assertEquals(2, result.completeness().expectedCount());
         assertEquals(2, result.completeness().actualCount());
@@ -269,31 +112,136 @@ class KlineQueryServiceTest {
     }
 
     @Test
-    void shouldMarkResultIncompleteWhenTodayBarsAreNotContinuousToLatestReturnedBar() {
-        InMemoryKlineRepository repository = new InMemoryKlineRepository();
-        Instant firstTime = LocalDateTime.of(2026, 5, 28, 9, 31).atZone(MARKET_ZONE).toInstant();
-        Instant thirdTime = LocalDateTime.of(2026, 5, 28, 9, 33).atZone(MARKET_ZONE).toInstant();
-        Instant missingTime = LocalDateTime.of(2026, 5, 28, 9, 32).atZone(MARKET_ZONE).toInstant();
-        repository.upsert(List.of(
-                bar(KlinePeriod.MINUTE_1, firstTime, "10", "11"),
-                bar(KlinePeriod.MINUTE_1, thirdTime, "12", "13")
+    void shouldResetMinuteSyncStateAndFallbackWhenInfluxIsIncompleteAfterHistoryCompleted() {
+        RecordingKlineRepository repository = new RecordingKlineRepository();
+        repository.upsert(List.of(bar(KlinePeriod.MINUTE_1, FIRST_BAR_TIME, "10", "11")));
+        FakeStockInfoRepository stockInfoRepository = new FakeStockInfoRepository(enabledListedStock());
+        StockSyncStateEntity state = successState(FIRST_BAR_TIME);
+        FakeStockSyncStateRepository stateRepository = new FakeStockSyncStateRepository(state);
+        FakeTushareKlineDataSource tushare = new FakeTushareKlineDataSource(List.of(
+                bar(KlinePeriod.MINUTE_1, FIRST_BAR_TIME, "10", "11"),
+                bar(KlinePeriod.MINUTE_1, SECOND_BAR_TIME, "11", "12")
         ));
-        KlineQueryService service = new KlineQueryServiceImpl(repository, new KlineAggregationServiceImpl(),
-                new RecordingCompletionService(repository), new RecordingStockInfoRepository(true),
-                new RecordingStockSyncStateRepository(true), new NoopTushareKlineDataSource(),
-                new FixedTradeMinuteWindowService(List.of(firstTime, missingTime, thirdTime)),
-                new NoopForwardAdjustmentService(), FIXED_CLOCK);
+        KlineQueryService service = newService(
+                repository,
+                new NoopForwardAdjustmentService(),
+                stockInfoRepository,
+                stateRepository,
+                tushare,
+                new FakeStockInfoService(stockInfoRepository)
+        );
 
         KlineQueryResult result = service.queryResult(new KlineQuery(
                 "000001.SZ",
                 KlinePeriod.MINUTE_1,
-                firstTime,
-                thirdTime.plusSeconds(60),
-                false));
+                FIRST_BAR_TIME,
+                SECOND_BAR_TIME.plusSeconds(60)
+        ));
 
-        assertFalse(result.completeness().complete());
-        assertEquals(3, result.completeness().expectedCount());
-        assertEquals(2, result.completeness().actualCount());
+        assertEquals(2, result.list().size());
+        assertEquals(SyncStatus.PENDING.getCode(), stateRepository.state.getSyncStatus());
+        assertEquals(LocalDateTime.ofInstant(FIRST_BAR_TIME, MARKET_ZONE), stateRepository.state.getCursorTime());
+        assertTrue(stateRepository.state.getLastError().contains("fallback to tushare"));
+        assertEquals(1, repository.queryCount);
+        assertEquals(1, stateRepository.updateCount);
+    }
+
+    @Test
+    void shouldRejectInvalidRangeAfterNormalizedStartResolution() {
+        FakeStockInfoRepository stockInfoRepository = new FakeStockInfoRepository(enabledListedStock());
+        StockSyncStateEntity state = successState(SECOND_BAR_TIME);
+        state.setStartTime(LocalDateTime.ofInstant(SECOND_BAR_TIME, MARKET_ZONE));
+        KlineQueryService service = newService(
+                new RecordingKlineRepository(),
+                new NoopForwardAdjustmentService(),
+                stockInfoRepository,
+                new FakeStockSyncStateRepository(state),
+                new FakeTushareKlineDataSource(List.of()),
+                new FakeStockInfoService(stockInfoRepository)
+        );
+
+        ServiceException exception = assertThrows(ServiceException.class, () -> service.queryResult(new KlineQuery(
+                "000001.SZ",
+                KlinePeriod.MINUTE_1,
+                FIRST_BAR_TIME,
+                SECOND_BAR_TIME.plusSeconds(30)
+        )));
+
+        assertEquals(ErrorCodeConstants.KLINE_TIME_RANGE_INVALID, exception.getCode());
+    }
+
+    @Test
+    void shouldRejectNotListedStock() {
+        StockInfoEntity stock = enabledListedStock();
+        stock.setStatus("DELISTED");
+        KlineQueryService service = newService(
+                new RecordingKlineRepository(),
+                new NoopForwardAdjustmentService(),
+                new FakeStockInfoRepository(stock),
+                new FakeStockSyncStateRepository(null),
+                new FakeTushareKlineDataSource(List.of()),
+                new FakeStockInfoService(new FakeStockInfoRepository(stock))
+        );
+
+        ServiceException exception = assertThrows(ServiceException.class, () -> service.queryResult(new KlineQuery(
+                "000001.SZ",
+                KlinePeriod.MINUTE_1,
+                FIRST_BAR_TIME,
+                SECOND_BAR_TIME.plusSeconds(60)
+        )));
+
+        assertEquals(ErrorCodeConstants.KLINE_STOCK_NOT_LISTED, exception.getCode());
+    }
+
+    private static KlineQueryService newService(
+            RecordingKlineRepository repository,
+            KlineForwardAdjustmentService adjustmentService,
+            FakeStockInfoRepository stockInfoRepository,
+            FakeStockSyncStateRepository stateRepository,
+            FakeTushareKlineDataSource tushare,
+            FakeStockInfoService stockInfoService) {
+        return new KlineQueryServiceImpl(
+                repository,
+                adjustmentService,
+                stockInfoRepository,
+                stateRepository,
+                new FixedTradeMinuteWindowService(),
+                tushare,
+                stockInfoService,
+                LocalDate.of(2015, 1, 1),
+                Clock.fixed(Instant.parse("2026-05-28T02:00:00Z"), ZoneId.of("UTC"))
+        );
+    }
+
+    private static StockInfoEntity enabledListedStock() {
+        StockInfoEntity stock = new StockInfoEntity();
+        stock.setId(1L);
+        stock.setSymbol("000001.SZ");
+        stock.setExchange("SSE");
+        stock.setStatus("LISTED");
+        stock.setIsRealtimeSyncEnabled(true);
+        stock.setListDate(LocalDate.of(2026, 5, 28));
+        return stock;
+    }
+
+    private static StockInfoEntity disabledListedStock() {
+        StockInfoEntity stock = enabledListedStock();
+        stock.setIsRealtimeSyncEnabled(false);
+        return stock;
+    }
+
+    private static StockSyncStateEntity successState(Instant start) {
+        StockSyncStateEntity state = new StockSyncStateEntity();
+        state.setId(10L);
+        state.setSymbol("000001.SZ");
+        state.setDataType(SyncDataType.KLINE_1M.getCode());
+        state.setStartTime(LocalDateTime.ofInstant(start, MARKET_ZONE));
+        state.setLatestSyncTime(LocalDateTime.ofInstant(start.plusSeconds(60), MARKET_ZONE));
+        state.setCursorTime(LocalDateTime.ofInstant(start.plusSeconds(120), MARKET_ZONE));
+        state.setSyncStatus(SyncStatus.SUCCESS.getCode());
+        state.setRetryCount(0);
+        state.setDataSource("tushare");
+        return state;
     }
 
     private static KlineBar bar(KlinePeriod period, Instant time, String open, String close) {
@@ -308,238 +256,207 @@ class KlineQueryServiceTest {
                 BigDecimal.ONE,
                 BigDecimal.ZERO,
                 true,
-                period == KlinePeriod.MINUTE_1 ? "tushare" : "aggregated"
+                "tushare"
         );
     }
 
-    private static final class RecordingCompletionService implements KlineCompletionService {
-        private final InMemoryKlineRepository repository;
-        private boolean called;
+    private static final class RecordingKlineRepository implements KlineRepository {
+        private final InMemoryKlineRepository delegate = new InMemoryKlineRepository();
+        private int queryCount;
+        private boolean checkCompletenessCalled;
 
-        private RecordingCompletionService(InMemoryKlineRepository repository) {
-            this.repository = repository;
+        @Override
+        public void upsert(List<KlineBar> bars) {
+            delegate.upsert(bars);
         }
 
         @Override
-        public void completeMinuteData(KlineQuery query) {
-            called = true;
-            repository.upsert(List.of(bar(KlinePeriod.MINUTE_1, query.startTime(), "10", "10")));
+        public List<KlineBar> query(String symbol, KlinePeriod period, Instant startTime, Instant endTime) {
+            queryCount++;
+            return delegate.query(symbol, period, startTime, endTime);
+        }
+
+        @Override
+        public KlineCompleteness checkCompleteness(
+                String symbol,
+                KlinePeriod period,
+                Instant startTime,
+                Instant endTime,
+                Collection<Instant> expectedTimes) {
+            checkCompletenessCalled = true;
+            return delegate.checkCompleteness(symbol, period, startTime, endTime, expectedTimes);
         }
     }
 
-    private static class NoopStockInfoRepository implements StockInfoRepository {
+    private static final class FakeStockInfoRepository implements StockInfoRepository {
+        private StockInfoEntity stock;
+
+        private FakeStockInfoRepository(StockInfoEntity stock) {
+            this.stock = stock;
+        }
+
         @Override
         public Long create(StockInfoEntity entity) {
-            return 1L;
+            throw new UnsupportedOperationException();
         }
 
         @Override
         public boolean update(StockInfoEntity entity) {
+            this.stock = entity;
             return true;
         }
 
         @Override
         public boolean upsertPreservingRealtimeFlag(StockInfoEntity entity) {
-            return true;
+            throw new UnsupportedOperationException();
         }
 
         @Override
         public boolean deleteById(Long id) {
-            return true;
+            throw new UnsupportedOperationException();
         }
 
         @Override
-        public java.util.Optional<StockInfoEntity> findById(Long id) {
-            return java.util.Optional.empty();
+        public Optional<StockInfoEntity> findById(Long id) {
+            return Optional.ofNullable(stock);
         }
 
         @Override
-        public java.util.Optional<StockInfoEntity> findBySymbol(String symbol) {
-            return java.util.Optional.empty();
+        public Optional<StockInfoEntity> findBySymbol(String symbol) {
+            return stock != null && symbol.equals(stock.getSymbol()) ? Optional.of(stock) : Optional.empty();
         }
 
         @Override
         public List<StockInfoEntity> findRealtimeSyncEnabled() {
-            return List.of();
+            throw new UnsupportedOperationException();
         }
 
         @Override
-        public java.util.Optional<StockInfoEntity> findNextRealtimeSyncEnabledAfterId(Long afterId) {
-            return java.util.Optional.empty();
+        public Optional<StockInfoEntity> findNextRealtimeSyncEnabledAfterId(Long afterId) {
+            throw new UnsupportedOperationException();
         }
 
         @Override
-        public List<StockInfoEntity> list(
+        public List<StockInfoEntity> list(com.fbw.finance.openfinancedb.controller.data.vo.req.StockInfoPageReqVO reqVO) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.fbw.finance.openfinancedb.framework.web.PageResult<StockInfoEntity> page(
                 com.fbw.finance.openfinancedb.controller.data.vo.req.StockInfoPageReqVO reqVO) {
-            return List.of();
-        }
-
-        @Override
-        public PageResult<StockInfoEntity> page(
-                com.fbw.finance.openfinancedb.controller.data.vo.req.StockInfoPageReqVO reqVO) {
-            return new PageResult<>(List.of(), 0L);
+            throw new UnsupportedOperationException();
         }
 
         @Override
         public int batchUpdateSyncEnabled(List<Long> ids, Boolean enabled) {
-            return 0;
+            throw new UnsupportedOperationException();
         }
 
         @Override
         public int batchUpdateSyncEnabledByQuery(
                 com.fbw.finance.openfinancedb.controller.data.vo.req.StockInfoPageReqVO reqVO,
                 Boolean enabled) {
-            return 0;
+            throw new UnsupportedOperationException();
         }
     }
 
-    private static final class RecordingStockInfoRepository extends NoopStockInfoRepository {
-        private final StockInfoEntity stock = new StockInfoEntity();
-        private boolean batchUpdateCalled;
+    private static final class FakeStockSyncStateRepository implements StockSyncStateRepository {
+        private StockSyncStateEntity state;
+        private int updateCount;
 
-        private RecordingStockInfoRepository() {
-            this(false);
+        private FakeStockSyncStateRepository(StockSyncStateEntity state) {
+            this.state = state;
         }
 
-        private RecordingStockInfoRepository(boolean enabled) {
-            stock.setId(1L);
-            stock.setSymbol("000001.SZ");
-            stock.setExchange("SZSE");
-            stock.setIsRealtimeSyncEnabled(enabled);
-        }
-
-        @Override
-        public java.util.Optional<StockInfoEntity> findBySymbol(String symbol) {
-            return java.util.Optional.of(stock);
-        }
-
-        @Override
-        public int batchUpdateSyncEnabled(List<Long> ids, Boolean enabled) {
-            batchUpdateCalled = true;
-            stock.setIsRealtimeSyncEnabled(enabled);
-            return ids.size();
-        }
-    }
-
-    private static class NoopStockSyncStateRepository implements StockSyncStateRepository {
         @Override
         public Long create(StockSyncStateEntity entity) {
-            return 1L;
+            throw new UnsupportedOperationException();
         }
 
         @Override
         public boolean update(StockSyncStateEntity entity) {
+            this.state = entity;
+            updateCount++;
             return true;
         }
 
         @Override
         public boolean deleteById(Long id) {
-            return true;
+            throw new UnsupportedOperationException();
         }
 
         @Override
-        public java.util.Optional<StockSyncStateEntity> findById(Long id) {
-            return java.util.Optional.empty();
+        public Optional<StockSyncStateEntity> findById(Long id) {
+            throw new UnsupportedOperationException();
         }
 
         @Override
-        public java.util.Optional<StockSyncStateEntity> findBySymbolAndDataType(String symbol, String dataType) {
-            return java.util.Optional.empty();
+        public Optional<StockSyncStateEntity> findBySymbolAndDataType(String symbol, String dataType) {
+            return state != null
+                    && symbol.equals(state.getSymbol())
+                    && dataType.equals(state.getDataType())
+                    ? Optional.of(state)
+                    : Optional.empty();
         }
 
         @Override
-        public PageResult<StockSyncStateEntity> page(
+        public com.fbw.finance.openfinancedb.framework.web.PageResult<StockSyncStateEntity> page(
                 com.fbw.finance.openfinancedb.controller.data.vo.req.StockSyncStatePageReqVO reqVO) {
-            return new PageResult<>(List.of(), 0L);
+            throw new UnsupportedOperationException();
         }
 
         @Override
         public List<StockSyncStateEntity> findBySymbolsAndDataType(List<String> symbols, String dataType) {
-            return List.of();
-        }
-    }
-
-    private static final class RecordingStockSyncStateRepository extends NoopStockSyncStateRepository {
-        private final StockSyncStateEntity state = new StockSyncStateEntity();
-
-        private RecordingStockSyncStateRepository(boolean complete) {
-            state.setSymbol("000001.SZ");
-            state.setDataType(SyncDataType.KLINE_1M.getCode());
-            state.setStartTime(LocalDateTime.of(2024, 1, 1, 0, 0));
-            state.setLatestSyncTime(complete ? LocalDateTime.of(2026, 5, 28, 0, 0) : LocalDateTime.of(2026, 5, 27, 0, 0));
-            state.setSyncStatus(complete ? SyncStatus.SUCCESS.getCode() : SyncStatus.PENDING.getCode());
-        }
-
-        @Override
-        public java.util.Optional<StockSyncStateEntity> findBySymbolAndDataType(String symbol, String dataType) {
-            return java.util.Optional.of(state);
-        }
-    }
-
-    private static class NoopTushareKlineDataSource implements TushareKlineDataSource {
-        @Override
-        public List<KlineBar> fetchMinuteBars(String symbol, LocalDate tradeDate) {
-            return List.of();
-        }
-
-        @Override
-        public List<KlineBar> fetchMinuteBars(String symbol, LocalDateTime startTimeInclusive, LocalDateTime endTimeExclusive) {
-            return List.of();
-        }
-
-        @Override
-        public List<KlineBar> fetchMinuteBars(
-                String symbol,
-                LocalDateTime startTimeInclusive,
-                LocalDateTime endTimeExclusive,
-                KlinePeriod period) {
-            return List.of();
-        }
-
-        @Override
-        public List<KlineBar> fetchRealtimeDailyMinuteBars(String symbol, KlinePeriod period) {
-            return List.of();
-        }
-
-        @Override
-        public List<KlineBar> fetchRealtimeMinuteBars(List<String> symbols, KlinePeriod period) {
-            return List.of();
-        }
-    }
-
-    private static final class RecordingTushareKlineDataSource extends NoopTushareKlineDataSource {
-        private List<KlineBar> historicalBars = List.of();
-        private List<KlineBar> realtimeBars = List.of();
-        private boolean historicalCalled;
-        private boolean realtimeCalled;
-
-        @Override
-        public List<KlineBar> fetchMinuteBars(
-                String symbol,
-                LocalDateTime startTimeInclusive,
-                LocalDateTime endTimeExclusive,
-                KlinePeriod period) {
-            historicalCalled = true;
-            return historicalBars;
-        }
-
-        @Override
-        public List<KlineBar> fetchRealtimeDailyMinuteBars(String symbol, KlinePeriod period) {
-            realtimeCalled = true;
-            return realtimeBars;
+            throw new UnsupportedOperationException();
         }
     }
 
     private static final class FixedTradeMinuteWindowService implements TradeMinuteWindowService {
-        private final List<Instant> expected;
+        @Override
+        public List<Instant> expectedMinuteInstants(String exchange, LocalDate startDate, LocalDate endDate) {
+            return List.of(FIRST_BAR_TIME, SECOND_BAR_TIME, THIRD_BAR_TIME);
+        }
+    }
 
-        private FixedTradeMinuteWindowService(List<Instant> expected) {
-            this.expected = expected;
+    private static final class FakeTushareKlineDataSource implements TushareKlineDataSource {
+        private final List<KlineBar> fallbackBars;
+
+        private FakeTushareKlineDataSource(List<KlineBar> fallbackBars) {
+            this.fallbackBars = fallbackBars;
         }
 
         @Override
-        public List<Instant> expectedMinuteInstants(String exchange, LocalDate startDate, LocalDate endDate) {
-            return expected;
+        public List<KlineBar> fetchMinuteBars(String symbol, LocalDate tradeDate) {
+            return fallbackBars;
+        }
+
+        @Override
+        public List<KlineBar> fetchMinuteBars(String symbol, LocalDateTime startTimeInclusive, LocalDateTime endTimeExclusive) {
+            return fallbackBars;
+        }
+
+        @Override
+        public List<KlineBar> fetchMinuteBars(
+                String symbol,
+                LocalDateTime startTimeInclusive,
+                LocalDateTime endTimeExclusive,
+                KlinePeriod period) {
+            return fallbackBars;
+        }
+
+        @Override
+        public List<KlineBar> fetchDailyBars(String symbol, LocalDate startDateInclusive, LocalDate endDateInclusive) {
+            return fallbackBars;
+        }
+
+        @Override
+        public List<KlineBar> fetchRealtimeDailyMinuteBars(String symbol, KlinePeriod period) {
+            return fallbackBars;
+        }
+
+        @Override
+        public List<KlineBar> fetchRealtimeMinuteBars(List<String> symbols, KlinePeriod period) {
+            return fallbackBars;
         }
     }
 
@@ -571,6 +488,58 @@ class KlineQueryServiceTest {
                             bar.source()
                     ))
                     .toList();
+        }
+    }
+
+    private static final class FakeStockInfoService implements StockInfoService {
+        private final FakeStockInfoRepository repository;
+        private boolean enableCalled;
+
+        private FakeStockInfoService(FakeStockInfoRepository repository) {
+            this.repository = repository;
+        }
+
+        @Override
+        public Long create(com.fbw.finance.openfinancedb.controller.data.vo.req.StockInfoCreateReqVO reqVO) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void update(Long id, com.fbw.finance.openfinancedb.controller.data.vo.req.StockInfoUpdateReqVO reqVO) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void delete(Long id) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.fbw.finance.openfinancedb.controller.data.vo.resp.StockInfoRespVO get(Long id) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.fbw.finance.openfinancedb.framework.web.PageResult<com.fbw.finance.openfinancedb.controller.data.vo.resp.StockInfoRespVO> page(
+                com.fbw.finance.openfinancedb.controller.data.vo.req.StockInfoPageReqVO reqVO) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void enableRealtimeSync(String symbol) {
+            enableCalled = true;
+            repository.findBySymbol(symbol).ifPresent(stock -> stock.setIsRealtimeSyncEnabled(true));
+        }
+
+        @Override
+        public int batchUpdateSyncEnabled(com.fbw.finance.openfinancedb.controller.data.vo.req.StockInfoBatchSyncReqVO reqVO) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public int batchUpdateSyncEnabledByQuery(
+                com.fbw.finance.openfinancedb.controller.data.vo.req.StockInfoBatchSyncByQueryReqVO reqVO) {
+            throw new UnsupportedOperationException();
         }
     }
 }

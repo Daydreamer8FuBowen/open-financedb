@@ -2,6 +2,7 @@ package com.fbw.finance.openfinancedb.datasource.tushare;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -31,9 +32,11 @@ import org.redisson.api.RedissonClient;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
 
 @SpringJUnitConfig(TushareKlineDataSourceTest.TestConfig.class)
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_EACH_TEST_METHOD)
 class TushareKlineDataSourceTest {
 
     private static final ZoneId MARKET_ZONE = ZoneId.of("Asia/Shanghai");
@@ -94,7 +97,7 @@ class TushareKlineDataSourceTest {
         );
         assertTrue(bars.stream().allMatch(bar -> bar.period() == KlinePeriod.MINUTE_1));
 
-        RecordedRequest request = server.takeRequest();
+        RecordedRequest request = takeRequiredRequest();
         String body = request.getBody().readUtf8();
         assertTrue(body.contains("\"api_name\":\"stk_mins\""));
         assertTrue(body.contains("\"freq\":\"1min\""));
@@ -108,7 +111,7 @@ class TushareKlineDataSourceTest {
                 .setResponseCode(200)
                 .setHeader("Content-Type", "application/json")
                 .setBody("""
-                        {"code":0,"msg":"","data":{"fields":["ts_code","time","open","high","low","close","vol","amount"],"items":[["000001.SZ","2026-05-27 11:30:00",10.73,10.74,10.73,10.74,205200,2201966],["000001.SZ","2026-05-27 11:31:00",10.74,10.75,10.74,10.75,1000,10750]]}}
+                        {"code":0,"msg":"","data":{"fields":["ts_code","time","open","high","low","close","vol","amount"],"items":[["000001.SZ","2026-05-28 09:31:00",10.73,10.74,10.73,10.74,205200,2201966],["000001.SZ","2026-05-28 09:32:00",10.74,10.75,10.74,10.75,1000,10750]]}}
                         """));
 
         List<KlineBar> bars = dataSource.fetchRealtimeMinuteBars("000001.SZ", KlinePeriod.MINUTE_1);
@@ -119,11 +122,11 @@ class TushareKlineDataSourceTest {
         assertTrue(bars.get(0).complete());
         assertFalse(bars.get(1).complete());
         assertEquals(
-                LocalDateTime.of(2026, 5, 27, 11, 30).atZone(MARKET_ZONE).toInstant(),
+                LocalDateTime.of(2026, 5, 28, 9, 31).atZone(MARKET_ZONE).toInstant(),
                 bars.get(0).time()
         );
 
-        RecordedRequest request = server.takeRequest();
+        RecordedRequest request = takeRequiredRequest();
         String body = request.getBody().readUtf8();
         assertTrue(body.contains("\"api_name\":\"rt_min\""));
         assertTrue(body.contains("\"freq\":\"1MIN\""));
@@ -142,7 +145,7 @@ class TushareKlineDataSourceTest {
 
         assertEquals(1, bars.size());
         assertEquals(KlinePeriod.MINUTE_1, bars.getFirst().period());
-        RecordedRequest request = server.takeRequest();
+        RecordedRequest request = takeRequiredRequest();
         String body = request.getBody().readUtf8();
         assertTrue(body.contains("\"api_name\":\"rt_min_daily\""));
         assertTrue(body.contains("\"freq\":\"1MIN\""));
@@ -167,12 +170,35 @@ class TushareKlineDataSourceTest {
     }
 
     @Test
+    void shouldFetchDailyBarsThroughDailyApi() throws Exception {
+        server.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setBody("""
+                        {"code":0,"msg":"","data":{"fields":["ts_code","trade_date","open","high","low","close","vol","amount"],"items":[["000001.SZ","20260527",10.1,10.5,10.0,10.3,123,456],["000001.SZ","20260528",10.3,10.8,10.2,10.6,223,556]]}}
+                        """));
+
+        List<KlineBar> bars = dataSource.fetchDailyBars("000001.SZ", LocalDate.of(2026, 5, 28), LocalDate.of(2026, 5, 28));
+
+        assertEquals(1, bars.size());
+        assertEquals(KlinePeriod.DAY_1, bars.getFirst().period());
+        assertEquals("tushare", bars.getFirst().source());
+        assertEquals(LocalDateTime.of(2026, 5, 28, 9, 31).atZone(MARKET_ZONE).toInstant(), bars.getFirst().time());
+
+        RecordedRequest request = takeRequiredRequest();
+        String body = request.getBody().readUtf8();
+        assertTrue(body.contains("\"api_name\":\"daily\""));
+        assertTrue(body.contains("\"start_date\":\"20260528\""));
+        assertTrue(body.contains("\"end_date\":\"20260528\""));
+    }
+
+    @Test
     void shouldFetchRealtimeMinuteBarsForMultipleSymbolsInSingleRequest() throws Exception {
         server.enqueue(new MockResponse()
                 .setResponseCode(200)
                 .setHeader("Content-Type", "application/json")
                 .setBody("""
-                        {"code":0,"msg":"","data":{"fields":["ts_code","time","open","high","low","close","vol","amount"],"items":[["000001.SZ","2026-05-27 11:30:00",10.73,10.74,10.73,10.74,205200,2201966],["000002.SZ","2026-05-27 11:30:00",20.73,20.74,20.73,20.74,305200,3201966]]}}
+                        {"code":0,"msg":"","data":{"fields":["ts_code","time","open","high","low","close","vol","amount"],"items":[["000001.SZ","2026-05-28 09:31:00",10.73,10.74,10.73,10.74,205200,2201966],["000002.SZ","2026-05-28 09:31:00",20.73,20.74,20.73,20.74,305200,3201966]]}}
                         """));
 
         List<KlineBar> bars = dataSource.fetchRealtimeMinuteBars(List.of("000001.SZ", "000002.SZ"), KlinePeriod.MINUTE_1);
@@ -180,7 +206,7 @@ class TushareKlineDataSourceTest {
         assertEquals(2, bars.size());
         assertEquals(List.of("000001.SZ", "000002.SZ"), bars.stream().map(KlineBar::symbol).sorted().toList());
 
-        RecordedRequest request = server.takeRequest();
+        RecordedRequest request = takeRequiredRequest();
         String body = request.getBody().readUtf8();
         assertTrue(body.contains("\"api_name\":\"rt_min\""));
         assertTrue(body.contains("\"ts_code\":\"000001.SZ,000002.SZ\""));
@@ -196,6 +222,12 @@ class TushareKlineDataSourceTest {
                 dataSource.fetchRealtimeMinuteBars(symbols, KlinePeriod.MINUTE_1));
 
         assertEquals("rt_min supports at most 300 symbols per request", exception.getMessage());
+    }
+
+    private RecordedRequest takeRequiredRequest() throws InterruptedException {
+        RecordedRequest request = server.takeRequest(1, TimeUnit.SECONDS);
+        assertNotNull(request, "expected one request to reach MockWebServer");
+        return request;
     }
 
     @Configuration
@@ -231,6 +263,7 @@ class TushareKlineDataSourceTest {
                     new FinanceHttpClient(new OkHttpClient(), executor),
                     new TushareRateLimiter(Map.of(
                             TushareApi.STK_MINS.apiName(), 10,
+                            TushareApi.DAILY.apiName(), 10,
                             TushareApi.RT_MIN.apiName(), 10,
                             TushareApi.RT_MIN_DAILY.apiName(), 10
                     ))

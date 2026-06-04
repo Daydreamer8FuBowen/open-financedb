@@ -341,6 +341,11 @@ class RealtimeKlineSyncSchedulerTest {
         }
 
         @Override
+        public List<KlineBar> fetchDailyBars(String symbol, LocalDate startDateInclusive, LocalDate endDateInclusive) {
+            return List.of();
+        }
+
+        @Override
         public List<KlineBar> fetchRealtimeDailyMinuteBars(String symbol, KlinePeriod period) {
             return fetchRealtimeMinuteBars(List.of(symbol), period);
         }

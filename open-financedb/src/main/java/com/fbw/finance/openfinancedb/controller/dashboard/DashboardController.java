@@ -1,5 +1,6 @@
 package com.fbw.finance.openfinancedb.controller.dashboard;
 
+import com.fbw.finance.openfinancedb.controller.dashboard.vo.resp.ApiUsageSummaryRespVO;
 import com.fbw.finance.openfinancedb.controller.dashboard.vo.resp.DashboardSummaryRespVO;
 import com.fbw.finance.openfinancedb.framework.web.CommonResult;
 import com.fbw.finance.openfinancedb.service.dashboard.DashboardService;
@@ -20,5 +21,10 @@ public class DashboardController {
     @GetMapping("/summary")
     public CommonResult<DashboardSummaryRespVO> getSummary() {
         return CommonResult.success(dashboardService.getSummary());
+    }
+
+    @GetMapping("/api-usage")
+    public CommonResult<ApiUsageSummaryRespVO> getApiUsage() {
+        return CommonResult.success(dashboardService.getApiUsageSummary());
     }
 }

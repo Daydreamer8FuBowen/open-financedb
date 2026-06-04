@@ -92,6 +92,25 @@ public class StockInfoServiceImpl implements StockInfoService {
 
     @Override
     @Transactional
+    public void enableRealtimeSync(String symbol) {
+        // 查询链路发现未开启历史同步时，会调用此方法：
+        // - 仅打开 stock_info.is_realtime_sync_enabled 开关（让后台历史同步 worker 纳入扫描范围）
+        // - 不在此处创建/推进 stock_sync_state(kline_1m)，保持职责单一
+        // - 同时异步触发复权因子（adj_factor）历史同步，保证 adjusted 查询有机会尽快可用
+        StockInfoEntity stock = stockInfoRepository.findBySymbol(symbol)
+                .orElseThrow(() -> new ServiceException(ErrorCodeConstants.STOCK_INFO_NOT_FOUND, "stock info not found"));
+        if (Boolean.TRUE.equals(stock.getIsRealtimeSyncEnabled())) {
+            return;
+        }
+        stock.setIsRealtimeSyncEnabled(true);
+        if (!stockInfoRepository.update(stock)) {
+            throw new ServiceException(ErrorCodeConstants.INTERNAL_SERVER_ERROR, "failed to enable realtime sync");
+        }
+        triggerAdjFactorHistorySync(stock);
+    }
+
+    @Override
+    @Transactional
     public int batchUpdateSyncEnabled(StockInfoBatchSyncReqVO reqVO) {
         int updated = stockInfoRepository.batchUpdateSyncEnabled(reqVO.getIds(), reqVO.getEnabled());
         if (Boolean.TRUE.equals(reqVO.getEnabled())) {

@@ -1,9 +1,12 @@
 package com.fbw.finance.openfinancedb.controller.market;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fbw.finance.openfinancedb.controller.market.vo.req.KlineQueryReqVO;
+import com.fbw.finance.openfinancedb.framework.exception.ErrorCodeConstants;
+import com.fbw.finance.openfinancedb.framework.exception.ServiceException;
 import com.fbw.finance.openfinancedb.model.market.KlineBar;
 import com.fbw.finance.openfinancedb.model.market.KlineCompleteness;
 import com.fbw.finance.openfinancedb.model.market.KlinePeriod;
@@ -38,6 +41,21 @@ class KlineControllerTest {
         assertEquals(2, result.getData().expectedCount());
         assertEquals(2, result.getData().actualCount());
         assertEquals(1, result.getData().list().size());
+    }
+
+    @Test
+    void shouldMapUnsupportedPeriodToBusinessError() {
+        RecordingKlineQueryService service = new RecordingKlineQueryService();
+        KlineController controller = new KlineController(service);
+        KlineQueryReqVO reqVO = new KlineQueryReqVO();
+        reqVO.setSymbol("000001.SZ");
+        reqVO.setPeriod("2m");
+        reqVO.setStartTime(OffsetDateTime.parse("2026-05-28T09:31:00+08:00"));
+        reqVO.setEndTime(OffsetDateTime.parse("2026-05-28T09:33:00+08:00"));
+
+        ServiceException exception = assertThrows(ServiceException.class, () -> controller.query(reqVO));
+
+        assertEquals(ErrorCodeConstants.KLINE_PERIOD_UNSUPPORTED, exception.getCode());
     }
 
     private static final class RecordingKlineQueryService implements KlineQueryService {

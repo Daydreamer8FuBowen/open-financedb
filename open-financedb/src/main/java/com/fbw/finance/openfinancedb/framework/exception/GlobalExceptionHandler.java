@@ -51,11 +51,6 @@ public class GlobalExceptionHandler {
         return CommonResult.error(ErrorCodeConstants.BAD_REQUEST, exception.getName() + " type mismatch");
     }
 
-    @ExceptionHandler(Exception.class)
-    public CommonResult<Void> handleException(Exception exception) {
-        return CommonResult.error(ErrorCodeConstants.INTERNAL_SERVER_ERROR, exception.getMessage());
-    }
-
     private String buildFieldErrors(List<FieldError> fieldErrors) {
         if (fieldErrors.isEmpty()) {
             return "invalid request";

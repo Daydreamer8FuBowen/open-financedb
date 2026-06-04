@@ -20,6 +20,8 @@ public interface StockInfoService {
 
     PageResult<StockInfoRespVO> page(StockInfoPageReqVO reqVO);
 
+    void enableRealtimeSync(String symbol);
+
     int batchUpdateSyncEnabled(StockInfoBatchSyncReqVO reqVO);
 
     int batchUpdateSyncEnabledByQuery(StockInfoBatchSyncByQueryReqVO reqVO);

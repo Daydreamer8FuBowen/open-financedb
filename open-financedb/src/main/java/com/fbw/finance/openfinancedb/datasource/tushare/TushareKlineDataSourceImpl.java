@@ -28,7 +28,9 @@ public class TushareKlineDataSourceImpl implements TushareKlineDataSource {
     private static final ZoneId MARKET_ZONE = ZoneId.of("Asia/Shanghai");
     private static final DateTimeFormatter TRADE_TIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
     private static final DateTimeFormatter REQUEST_TIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    private static final DateTimeFormatter DAILY_DATE_FORMATTER = DateTimeFormatter.BASIC_ISO_DATE;
     private static final String STK_MINS_FIELDS = "ts_code,trade_time,open,high,low,close,vol,amount";
+    private static final String DAILY_FIELDS = "ts_code,trade_date,open,high,low,close,vol,amount";
     private static final String RT_MIN_FIELDS = "ts_code,time,open,high,low,close,vol,amount";
     private static final Duration REALTIME_DAILY_CACHE_TTL = Duration.ofSeconds(10);
     private static final String REALTIME_DAILY_CACHE_KEY_PREFIX = "tushare:rt-min-daily:cache:";
@@ -71,6 +73,7 @@ public class TushareKlineDataSourceImpl implements TushareKlineDataSource {
         params.put("ts_code", symbol);
         params.put("freq", toHistoricalFreq(period));
         params.put("start_date", startTimeInclusive.format(REQUEST_TIME_FORMATTER));
+        // 秒级时间边界兼容：对外约定是半开区间 [start, end)，Tushare 按秒精度查询
         // Tushare's time range is requested with second precision. The public data-source
         // contract is half-open at minute precision: [startTimeInclusive, endTimeExclusive).
         // Sending endExclusive - 1 second asks Tushare for the last included minute while
@@ -105,6 +108,29 @@ public class TushareKlineDataSourceImpl implements TushareKlineDataSource {
         )).join();
 
         return toRealtimeBars(response, period);
+    }
+
+    @Override
+    public List<KlineBar> fetchDailyBars(String symbol, LocalDate startDateInclusive, LocalDate endDateInclusive) {
+        // 日线回退：用于 /v1/api/market/klines?period=1d 在 Influx 不完整时的“读穿透”回源
+        // 仅返回给调用方，不负责写入 Influx
+        if (startDateInclusive == null || endDateInclusive == null || startDateInclusive.isAfter(endDateInclusive)) {
+            return List.of();
+        }
+
+        Map<String, Object> params = new LinkedHashMap<>();
+        params.put("ts_code", symbol);
+        params.put("start_date", startDateInclusive.format(DAILY_DATE_FORMATTER));
+        params.put("end_date", endDateInclusive.format(DAILY_DATE_FORMATTER));
+
+        TushareResponse response = tushareClient.callAsync(new TushareRequest(
+                TushareApi.DAILY.apiName(),
+                params,
+                DAILY_FIELDS,
+                HttpPriority.HIGH
+        )).join();
+
+        return toDailyBars(response, startDateInclusive, endDateInclusive);
     }
 
     @Override
@@ -202,6 +228,44 @@ public class TushareKlineDataSourceImpl implements TushareKlineDataSource {
 
     private List<KlineBar> toHistoricalBars(TushareResponse response, KlinePeriod period) {
         return toBars(response, "trade_time", period, true);
+    }
+
+    private List<KlineBar> toDailyBars(TushareResponse response, LocalDate startDateInclusive, LocalDate endDateInclusive) {
+        if (response.data() == null || response.data().fields() == null || response.data().items() == null) {
+            return List.of();
+        }
+        Map<String, Integer> fieldIndex = new LinkedHashMap<>();
+        List<String> fields = response.data().fields();
+        for (int i = 0; i < fields.size(); i++) {
+            fieldIndex.put(fields.get(i), i);
+        }
+        List<KlineBar> bars = new ArrayList<>();
+        for (List<Object> item : response.data().items()) {
+            String tradeDateValue = string(item, fieldIndex, "trade_date");
+            if (tradeDateValue.isBlank()) {
+                continue;
+            }
+            LocalDate tradeDate = LocalDate.parse(tradeDateValue, DAILY_DATE_FORMATTER);
+            if (tradeDate.isBefore(startDateInclusive) || tradeDate.isAfter(endDateInclusive)) {
+                continue;
+            }
+            bars.add(new KlineBar(
+                    string(item, fieldIndex, "ts_code"),
+                    KlinePeriod.DAY_1,
+                    tradeDate.atTime(9, 31).atZone(MARKET_ZONE).toInstant(),
+                    decimal(item, fieldIndex, "open"),
+                    decimal(item, fieldIndex, "high"),
+                    decimal(item, fieldIndex, "low"),
+                    decimal(item, fieldIndex, "close"),
+                    decimal(item, fieldIndex, "vol"),
+                    decimal(item, fieldIndex, "amount"),
+                    true,
+                    "tushare"
+            ));
+        }
+        return bars.stream()
+                .sorted((left, right) -> left.time().compareTo(right.time()))
+                .toList();
     }
 
     private List<KlineBar> toRealtimeBars(TushareResponse response, KlinePeriod period) {

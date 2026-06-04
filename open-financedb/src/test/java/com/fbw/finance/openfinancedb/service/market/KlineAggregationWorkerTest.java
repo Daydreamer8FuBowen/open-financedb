@@ -721,6 +721,11 @@ class KlineAggregationWorkerTest {
         }
 
         @Override
+        public List<KlineBar> fetchDailyBars(String symbol, LocalDate startDateInclusive, LocalDate endDateInclusive) {
+            return List.of();
+        }
+
+        @Override
         public List<KlineBar> fetchRealtimeDailyMinuteBars(String symbol, KlinePeriod period) {
             realtimeDailySymbols.add(symbol);
             return realtimeDailyBars;
